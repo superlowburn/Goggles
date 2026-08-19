@@ -1,4 +1,4 @@
-# Eclipse Goggles Implementation Plan
+# Goggles Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -180,7 +180,7 @@ export default defineConfig({
 // public/manifest.json
 {
   "manifest_version": 3,
-  "name": "Eclipse Goggles",
+  "name": "Goggles",
   "description": "Safety goggles for visual media on the web.",
   "version": "0.1.0",
   "permissions": ["storage", "activeTab"],
@@ -198,7 +198,7 @@ export default defineConfig({
 }
 ```
 
-Use `void 0;` as the initial content and background entry contents. The popup HTML must load `popup.js` with `<script type="module" src="popup.js"></script>` and contain `<main id="app">Eclipse Goggles</main>`; its CSS must set a 280px minimum width and use system fonts.
+Use `void 0;` as the initial content and background entry contents. The popup HTML must load `popup.js` with `<script type="module" src="popup.js"></script>` and contain `<main id="app">Goggles</main>`; its CSS must set a 280px minimum width and use system fonts.
 
 - [ ] **Step 5: Add the deterministic esbuild script**
 
@@ -243,7 +243,7 @@ Expected: all commands exit 0 and `dist/manifest.json` exists.
 
 ```bash
 git add package.json package-lock.json tsconfig.json vitest.config.ts scripts public src tests
-git commit -m "chore: scaffold Eclipse Goggles extension"
+git commit -m "chore: scaffold Goggles extension"
 ```
 
 ---
@@ -654,7 +654,7 @@ Expected: FAIL because `mountPopup` does not exist.
 
 - [ ] **Step 3: Implement accessible popup markup and behavior**
 
-Use one `<h1>Eclipse Goggles</h1>`, hostname text, a `<div role="group" aria-label="Image protection for this site">`, and three `<button type="button">` controls. Keep all copy in the popup module and all visual styling in `popup.css`. Use visible `:focus-visible` outlines and no animation when `prefers-reduced-motion: reduce`.
+Use one `<h1>Goggles</h1>`, hostname text, a `<div role="group" aria-label="Image protection for this site">`, and three `<button type="button">` controls. Keep all copy in the popup module and all visual styling in `popup.css`. Use visible `:focus-visible` outlines and no animation when `prefers-reduced-motion: reduce`.
 
 - [ ] **Step 4: Build and verify popup tests**
 
@@ -706,7 +706,7 @@ const context = await chromium.launchPersistentContext("", {
 
 - [ ] **Step 2: Write the failing image acceptance test**
 
-The article fixture must contain a 640x360 image with alt text, a 24x24 icon, and two sibling content images. Assert the content image gets a visible Eclipse Goggles layer with the alt text, the icon does not, clicking one Reveal leaves its sibling protected, and pressing Enter can reveal the sibling.
+The article fixture must contain a 640x360 image with alt text, a 24x24 icon, and two sibling content images. Assert the content image gets a visible Goggles layer with the alt text, the icon does not, clicking one Reveal leaves its sibling protected, and pressing Enter can reveal the sibling.
 
 Run: `npm run test:e2e -- --grep "protects article images"`
 
@@ -761,7 +761,7 @@ Expected: no whitespace errors; only Task 8 files are uncommitted.
 
 ```bash
 git add .gitignore playwright.config.ts tests/e2e README.md
-git commit -m "test: verify Eclipse Goggles in Chromium"
+git commit -m "test: verify Goggles in Chromium"
 ```
 
 ---
