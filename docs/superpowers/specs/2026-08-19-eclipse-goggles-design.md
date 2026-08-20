@@ -136,7 +136,7 @@ The extension popup exposes one mutually exclusive mode per site origin:
 - Default for every site.
 - Images and supported videos are frosted.
 - Individual reveals last for the current document session.
-- A future `Reveal all on this page` command may be added, but it is not part of the first release.
+- `Reveal all` reveals media currently protected on the page; newly loaded media remains frosted.
 
 ### Strict
 
