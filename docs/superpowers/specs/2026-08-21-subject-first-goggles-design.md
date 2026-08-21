@@ -11,10 +11,10 @@ A user may still deliberately reveal one blocked item. Site-wide permission and 
 
 ## Popup
 
-The popup contains one live site switch: **Frost ordinary media on {hostname}**.
+The popup contains one live site switch: **Frost images and videos on {hostname}**.
 
 - On: images and videos stay frosted until individually revealed.
-- Off: ordinary media shows normally; blocked subjects stay frosted.
+- Off: images and videos show normally; blocked subjects stay frosted.
 
 Below the switch, show **Blocked subjects** with status **On everywhere** or **Off**, then one **Settings** link. Remove mode cards and all Trusted, Protected, and Strict terminology.
 
@@ -29,7 +29,7 @@ Remove the per-item goggles menu, reveal-all action, site-permission action, and
 Settings has two main sections:
 
 1. **Blocked subjects** — “Always frost likely matches, on every site.” Each subject has a toggle and an expandable matching-word editor.
-2. **Sites showing ordinary media** — “Blocked subjects still stay frosted on these sites.” Each exception offers **Frost ordinary media again**.
+2. **Sites showing images and videos** — “Blocked subjects still stay frosted on these sites.” Each exception offers **Frost images and videos again**.
 
 Remove the default-mode section. New sites are protected by definition. Keep the compact Goggles header and local-processing privacy note.
 
