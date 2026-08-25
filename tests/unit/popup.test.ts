@@ -114,6 +114,28 @@ describe("mountPopup", () => {
     });
   });
 
+  it("sends the verified social origin so the worker can route the platform-family write", async () => {
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce({
+        ...policyContext(true),
+        origin: "https://old.reddit.com",
+      })
+      .mockResolvedValueOnce({ origin: "https://old.reddit.com", mode: "trusted" });
+    const chromeApi = createChromeApi(sendMessage);
+    await mountPopup(root, chromeApi);
+
+    getSwitch(root).click();
+
+    await vi.waitFor(() => {
+      expect(sendMessage).toHaveBeenLastCalledWith({
+        type: "policy:set-tab",
+        tabId: 7,
+        mode: "trusted",
+        expectedOrigin: "https://old.reddit.com",
+      });
+    });
+  });
+
   it("frosts ordinary media when the site switch is turned on", async () => {
     const chromeApi = createChromeApi(
       vi

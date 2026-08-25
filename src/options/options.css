@@ -157,7 +157,49 @@ h2 {
 .privacy-note { max-width: 660px; margin: 18px 0 0; font-size: 14px; }
 .save-status { min-height: 24px; margin: 8px 0 0; color: var(--lens); font-size: 14px; }
 
-.site-rules { margin-top: 24px; border-top: 1px solid var(--line); }
+.site-rules,
+.platform-list { margin-top: 24px; border-top: 1px solid var(--line); }
+.platform-rule {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 14px;
+  align-items: center;
+  min-height: 58px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+.platform-state { color: var(--muted); font-size: 14px; }
+.platform-rule input {
+  appearance: none;
+  position: relative;
+  width: 46px;
+  height: 26px;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #d7d3c5;
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+.platform-rule input::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: transform 140ms ease;
+}
+.platform-rule input:checked { background: var(--lens); }
+.platform-rule input:checked::after { transform: translateX(20px); }
+.platform-rule input:focus-visible {
+  outline: 3px solid var(--brass);
+  outline-offset: 3px;
+}
 .subject-card {
   margin-top: 28px;
   overflow: hidden;

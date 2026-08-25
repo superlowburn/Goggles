@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { readFile } from "node:fs/promises";
 import { mountOptions, type OptionsChromeApi } from "../../src/options/options";
-import { policyKey } from "../../src/shared/site-policy";
+import { policyKey, socialPolicyKey } from "../../src/shared/site-policy";
 
 function chromeApi(initial: Record<string, unknown>): OptionsChromeApi & {
   state: Record<string, unknown>;
@@ -25,7 +25,7 @@ describe("mountOptions", () => {
     document.body.innerHTML = new DOMParser().parseFromString(source, "text/html").body.innerHTML;
   });
 
-  it("puts blocked subjects first and lists only sites allowed to show images and videos", async () => {
+  it("keeps Blocked Subjects first and adds the two policy sections", async () => {
     const api = chromeApi({
       [policyKey("https://example.com")]: "trusted",
       [policyKey("https://frosted.example")]: "protected",
@@ -37,18 +37,80 @@ describe("mountOptions", () => {
 
     expect(root.querySelector('[data-default-mode]')).toBeNull();
     expect(root.querySelector("section h2")?.textContent).toBe("Blocked subjects");
-    expect(root.textContent).toContain("Sites showing images and videos");
-    expect(root.textContent).toContain("Blocked subjects stay frosted");
+    expect([...root.querySelectorAll("section h2")].map(({ textContent }) => textContent)).toEqual([
+      "Blocked subjects",
+      "Social platforms",
+      "Sites always frosted",
+    ]);
+    expect(root.textContent).toContain("Blocked Subjects remain frosted");
     expect(root.textContent).toContain("Best effort: Goggles may miss or misidentify images.");
-    expect(document.querySelector("#site-rules")?.textContent).toContain("example.com");
-    expect(document.querySelector("#site-rules")?.textContent).not.toContain("frosted.example");
-    expect(document.querySelector("#site-rules")?.textContent).not.toContain("legacy.example");
-    expect(document.querySelector("[data-remove-policy]")?.textContent).toBe("Frost images and videos again");
+    expect(document.querySelector("#site-rules")?.textContent).not.toContain("example.com");
+    expect(document.querySelector("#site-rules")?.textContent).toContain("frosted.example");
+    expect(document.querySelector("#site-rules")?.textContent).toContain("legacy.example");
+    expect(document.querySelector("[data-remove-policy]")?.textContent).toBe("Remove");
   });
 
-  it("removes a trusted-site exception from the settings list", async () => {
+  it("renders all eight social switches in catalog order and defaults them On", async () => {
+    const api = chromeApi({ [socialPolicyKey("reddit")]: "trusted" });
+    await mountOptions(document.querySelector("#app")!, api);
+
+    const switches = [...document.querySelectorAll<HTMLInputElement>("[data-social-platform]")];
+    expect(switches.map(({ dataset }) => dataset.socialPlatform)).toEqual([
+      "facebook", "instagram", "reddit", "x", "tiktok", "threads", "bluesky", "youtube",
+    ]);
+    expect(switches.map(({ labels }) => labels?.[0]?.textContent?.trim())).toEqual([
+      "FacebookOn", "InstagramOn", "RedditOff", "X/TwitterOn",
+      "TikTokOn", "ThreadsOn", "BlueskyOn", "YouTubeOn",
+    ]);
+    expect(switches.map(({ checked }) => checked)).toEqual([
+      true, true, false, true, true, true, true, true,
+    ]);
+    expect(switches.every((toggle) => toggle.type === "checkbox" && toggle.getAttribute("role") === "switch"))
+      .toBe(true);
+  });
+
+  it("persists each social switch independently and rolls back failed writes inline", async () => {
+    const api = chromeApi({ [socialPolicyKey("reddit")]: "trusted" });
+    const set = vi.spyOn(api.storage.local, "set");
+    await mountOptions(document.querySelector("#app")!, api);
+    const facebook = document.querySelector<HTMLInputElement>('[data-social-platform="facebook"]')!;
+    const reddit = document.querySelector<HTMLInputElement>('[data-social-platform="reddit"]')!;
+
+    facebook.checked = false;
+    facebook.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(api.state[socialPolicyKey("facebook")]).toBe("trusted"));
+    expect(api.state[socialPolicyKey("reddit")]).toBe("trusted");
+
+    set.mockRejectedValueOnce(new Error("storage unavailable"));
+    reddit.checked = true;
+    reddit.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(reddit.checked).toBe(false));
+    expect(document.querySelector("#social-platforms-status")?.textContent)
+      .toBe("Couldn't save. Try again.");
+    expect(api.state[socialPolicyKey("reddit")]).toBe("trusted");
+  });
+
+  it("lists protected non-social exact origins in deterministic alphabetical order", async () => {
+    const api = chromeApi({
+      [policyKey("https://zeta.example:8443")]: "protected",
+      [policyKey("http://alpha.example")]: "strict",
+      [policyKey("https://middle.example")]: "trusted",
+      [policyKey("https://old.reddit.com")]: "protected",
+    });
+    await mountOptions(document.querySelector("#app")!, api);
+
+    expect([...document.querySelectorAll<HTMLElement>("[data-site-origin]")]
+      .map(({ dataset }) => dataset.siteOrigin)).toEqual([
+      "http://alpha.example",
+      "https://zeta.example:8443",
+    ]);
+    expect(document.querySelector("#site-rules")?.textContent).not.toContain("middle.example");
+    expect(document.querySelector("#site-rules")?.textContent).not.toContain("reddit.com");
+  });
+
+  it("removes a protected-site rule and restores the empty state", async () => {
     const key = policyKey("https://example.com");
-    const api = chromeApi({ [key]: "trusted" });
+    const api = chromeApi({ [key]: "protected" });
     await mountOptions(document.querySelector("#app")!, api);
 
     (document.querySelector("[data-remove-policy]") as HTMLButtonElement).click();
@@ -56,6 +118,24 @@ describe("mountOptions", () => {
 
     expect(key in api.state).toBe(false);
     expect(document.querySelector("#site-rules .empty-rules")).not.toBeNull();
+    expect(document.querySelector("#site-rules")?.textContent).toContain("No sites are always frosted.");
+  });
+
+  it("rolls a failed protected-site removal back and announces the error inline", async () => {
+    const key = policyKey("https://example.com");
+    const api = chromeApi({ [key]: "protected" });
+    vi.spyOn(api.storage.local, "remove").mockRejectedValueOnce(new Error("storage unavailable"));
+    await mountOptions(document.querySelector("#app")!, api);
+
+    (document.querySelector("[data-remove-policy]") as HTMLButtonElement).click();
+
+    await vi.waitFor(() => {
+      expect(document.querySelector<HTMLElement>("[data-site-origin]")?.dataset.siteOrigin)
+        .toBe("https://example.com");
+      expect(document.querySelector("#site-rules-status")?.textContent)
+        .toBe("Couldn't save. Try again.");
+    });
+    expect(api.state[key]).toBe("protected");
   });
 
   it("turns the onboarding demo into the revealed state", async () => {

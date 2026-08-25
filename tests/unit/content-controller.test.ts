@@ -119,6 +119,118 @@ beforeEach(() => {
 });
 
 describe("ContentController", () => {
+  it("adds one exact-origin frost action to current and future trusted non-social media", async () => {
+    const first = document.createElement("img");
+    const second = document.createElement("img");
+    vi.spyOn(first, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 320, 200));
+    vi.spyOn(second, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 320, 200));
+    document.body.append(first, second);
+    const setSiteMode = vi.fn().mockResolvedValue(undefined);
+    const harness = controllerHarness(new Map([
+      [first, candidate(first, "image")],
+      [second, candidate(second, "image")],
+    ]), { enableSiteControl: true, setSiteMode });
+
+    harness.controller.start({ origin: "https://news.example", mode: "trusted" });
+    harness.observer.emit([first]);
+    harness.observer.emit([first, second]);
+
+    expect(harness.renderer.activeFor(first)).toHaveLength(1);
+    expect(harness.renderer.activeFor(second)).toHaveLength(1);
+    const control = harness.renderer.activeFor(first)[0]?.options.siteControl;
+    expect(control?.mode).toBe("protected");
+    await control?.save();
+    expect(setSiteMode).toHaveBeenCalledWith("https://news.example", "protected");
+  });
+
+  it("does not add Always frost controls to a social platform switched Off", () => {
+    const image = document.createElement("img");
+    document.body.append(image);
+    const harness = controllerHarness(new Map([[image, candidate(image, "image")]]), {
+      enableSiteControl: true,
+      setSiteMode: vi.fn(),
+    });
+
+    harness.controller.start({ origin: "https://old.reddit.com", mode: "trusted" });
+    harness.observer.emit([image]);
+
+    expect(harness.renderer.protect).not.toHaveBeenCalled();
+  });
+
+  it("does not create a trusted-page control root below 280x180", () => {
+    const image = document.createElement("img");
+    vi.spyOn(image, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 279, 180));
+    document.body.append(image);
+    const harness = controllerHarness(new Map([[image, candidate(image, "image")]]), {
+      enableSiteControl: true,
+      setSiteMode: vi.fn(),
+    });
+
+    harness.controller.start({ origin: "https://news.example", mode: "trusted" });
+    harness.observer.emit([image]);
+
+    expect(harness.renderer.protect).not.toHaveBeenCalled();
+  });
+
+  it("offers Always show on protected media and reconciles current and future ordinary media", async () => {
+    const current = document.createElement("img");
+    const future = document.createElement("img");
+    vi.spyOn(current, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 320, 200));
+    vi.spyOn(future, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 320, 200));
+    document.body.append(current, future);
+    const setSiteMode = vi.fn().mockResolvedValue(undefined);
+    const harness = controllerHarness(new Map([
+      [current, candidate(current, "image")],
+      [future, candidate(future, "image")],
+    ]), { enableSiteControl: true, setSiteMode });
+    harness.controller.start({ origin: "https://news.example", mode: "protected" });
+    harness.observer.emit([current]);
+
+    const control = harness.renderer.activeFor(current)[0]?.options.siteControl;
+    expect(control?.mode).toBe("trusted");
+    await control?.save();
+    expect(setSiteMode).toHaveBeenCalledWith("https://news.example", "trusted");
+
+    harness.controller.applyMode("trusted");
+    harness.observer.emit([current, future]);
+    expect(harness.renderer.activeFor(current)[0]?.options.siteControl?.mode).toBe("protected");
+    expect(harness.renderer.activeFor(future)[0]?.options.siteControl?.mode).toBe("protected");
+  });
+
+  it("keeps a manually revealed subject while Always show removes only ordinary protection", async () => {
+    const subject = document.createElement("img");
+    subject.alt = "Donald Trump at an event";
+    const ordinary = document.createElement("img");
+    ordinary.alt = "A quiet lake";
+    const futureSubject = document.createElement("img");
+    futureSubject.alt = "Donald Trump at another event";
+    vi.spyOn(ordinary, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 320, 200));
+    document.body.append(subject, ordinary, futureSubject);
+    const harness = controllerHarness(new Map([
+      [subject, candidate(subject, "image")],
+      [ordinary, candidate(ordinary, "image")],
+      [futureSubject, candidate(futureSubject, "image")],
+    ]), { enableSiteControl: true, setSiteMode: vi.fn().mockResolvedValue(undefined) });
+    harness.controller.start({
+      origin: "https://news.example",
+      mode: "protected",
+      blockedSubjects: { enabled: true, keywords: ["Trump"] },
+    });
+    harness.observer.emit([subject, ordinary]);
+    const subjectRecord = harness.renderer.activeFor(subject)[0]!;
+    subjectRecord.handle.reveal();
+
+    await harness.renderer.activeFor(ordinary)[0]?.options.siteControl?.save();
+    harness.controller.applyMode("trusted");
+    harness.observer.emit([subject, ordinary, futureSubject]);
+
+    expect(harness.renderer.activeFor(subject)[0]).toBe(subjectRecord);
+    expect(subjectRecord.handle.isRevealed()).toBe(true);
+    expect(harness.renderer.activeFor(ordinary)[0]?.options.siteControl?.mode).toBe("protected");
+    expect(harness.renderer.activeFor(futureSubject)[0]?.options.blockedSubject).toBe(true);
+    expect(harness.renderer.activeFor(futureSubject)[0]?.handle.isRevealed()).toBe(false);
+  });
+
   it("observes Trusted mode without protecting unrelated dynamic media", () => {
     const image = document.createElement("img");
     const frame = document.createElement("iframe");

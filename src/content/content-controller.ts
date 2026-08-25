@@ -2,6 +2,7 @@ import { classifyElement } from "../media/classifier";
 import { resolveDescription } from "../media/description";
 import {
   ProtectionRenderer,
+  isSiteControlEligible,
   type ProtectionHandle,
   type ProtectionOptions,
 } from "../protection/renderer";
@@ -15,6 +16,7 @@ import {
   parseBlockedSubjects,
   type BlockedSubjectsConfig,
 } from "../shared/blocked-subjects";
+import { socialPlatformForOrigin } from "../shared/site-policy";
 import { DocumentObserver } from "./document-observer";
 
 declare const __DEV__: boolean;
@@ -52,6 +54,7 @@ export interface ContentControllerDependencies {
 interface ProtectionRecord {
   candidate: MediaCandidate;
   handle: ProtectionHandle;
+  passive: boolean;
   providerSource?: string | null;
 }
 
@@ -64,6 +67,8 @@ export class ContentController {
   private readonly development: boolean;
   private readonly logDiagnostic: (tagName: string, message: string) => void;
   private readonly setDescriptionsVisible: (origin: string, visible: boolean) => void | Promise<void>;
+  private readonly setSiteMode: (origin: string, mode: SiteMode) => void | Promise<void>;
+  private readonly enableSiteControl: boolean;
   private readonly byElement = new WeakMap<Element, ProtectionRecord>();
   private readonly records = new Set<ProtectionRecord>();
   private mode: SiteMode = "trusted";
@@ -93,6 +98,8 @@ export class ContentController {
     this.logDiagnostic = dependencies.logDiagnostic ??
       ((tagName, message) => console.warn(`Goggles: ${tagName}: ${message}`));
     this.setDescriptionsVisible = dependencies.setDescriptionsVisible ?? (() => undefined);
+    this.setSiteMode = dependencies.setSiteMode ?? (() => undefined);
+    this.enableSiteControl = dependencies.enableSiteControl ?? false;
   }
 
   start(context: PolicyContext): void {
@@ -175,9 +182,10 @@ export class ContentController {
       if (!element.isConnected) return;
       if (this.mode === "trusted") {
         const candidate = this.classify(element);
-        if (candidate && candidateMatchesBlockedSubject(candidate, this.blockedSubjects)) {
-          this.createProtection(candidate);
-          return;
+        if (!candidate) return;
+        const blockedSubject = candidateMatchesBlockedSubject(candidate, this.blockedSubjects);
+        if (blockedSubject || (this.offersTrustedSiteControl() && isSiteControlEligible(candidate))) {
+          this.createProtection(candidate, blockedSubject);
         }
         return;
       }
@@ -202,10 +210,12 @@ export class ContentController {
       mode: this.mode,
       onToggleDescriptions: () => this.toggleDescriptions(),
       descriptionsVisible: this.descriptionsVisible,
+      ...this.siteControl(blockedSubject),
     });
     const record: ProtectionRecord = {
       candidate,
       handle,
+      passive: this.mode === "trusted" && !blockedSubject,
       ...(candidate.kind === "video-iframe" && candidate.element instanceof HTMLIFrameElement
         ? { providerSource: candidate.element.getAttribute("src") }
         : {}),
@@ -213,6 +223,29 @@ export class ContentController {
     this.byElement.set(candidate.element, record);
     this.records.add(record);
     this.observer.trackLayout?.(candidate.element);
+  }
+
+  private offersTrustedSiteControl(): boolean {
+    return this.enableSiteControl && Boolean(this.origin) && !socialPlatformForOrigin(this.origin!);
+  }
+
+  private siteControl(blockedSubject: boolean): Pick<ProtectionOptions, "siteControl"> | {} {
+    if (!this.enableSiteControl || !this.origin) return {};
+    if (this.mode === "trusted") {
+      if (blockedSubject || socialPlatformForOrigin(this.origin)) return {};
+      return {
+        siteControl: {
+          mode: "protected" as const,
+          save: () => Promise.resolve(this.setSiteMode(this.origin!, "protected")),
+        },
+      };
+    }
+    return {
+      siteControl: {
+        mode: "trusted" as const,
+        save: () => Promise.resolve(this.setSiteMode(this.origin!, "trusted")),
+      },
+    };
   }
 
   private hasOverlappingVideoRecord(candidate: MediaCandidate): boolean {
@@ -265,7 +298,12 @@ export class ContentController {
   private reconcileProtection(): void {
     for (const record of [...this.records]) {
       const blockedSubject = candidateMatchesBlockedSubject(record.candidate, this.blockedSubjects);
-      if (!record.candidate.element.isConnected || (this.mode === "trusted" && !blockedSubject)) {
+      const shouldBePassive = this.mode === "trusted" && !blockedSubject && this.offersTrustedSiteControl();
+      if (
+        !record.candidate.element.isConnected ||
+        (this.mode === "trusted" && !blockedSubject && !shouldBePassive) ||
+        record.passive !== shouldBePassive
+      ) {
         this.detachRecord(record);
       } else {
         record.handle.setBlockedSubject(blockedSubject);
