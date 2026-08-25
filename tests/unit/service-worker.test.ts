@@ -126,6 +126,33 @@ describe("handleExtensionMessage", () => {
     expect(values[platformKey]).toBe("protected");
   });
 
+  it("keeps policy messaging available and retries after a migration read fails", async () => {
+    let failMigration = true;
+    const storage = {
+      get: vi.fn((key: null | string | string[]) => {
+        if (key === null) {
+          if (failMigration) {
+            failMigration = false;
+            return Promise.reject(new Error("temporary storage failure"));
+          }
+          return Promise.resolve({});
+        }
+        return Promise.resolve({});
+      }),
+      set: vi.fn(),
+    };
+    const deps = { storage, tabs: { get: vi.fn() } };
+    const sender = { tab: { id: 7, url: "https://news.example/story" } };
+
+    await expect(handleExtensionMessage({ type: "policy:get-current" }, sender, deps))
+      .resolves.toMatchObject({ origin: "https://news.example", mode: "trusted" });
+    await expect(handleExtensionMessage({ type: "policy:get-current" }, sender, deps))
+      .resolves.toMatchObject({ origin: "https://news.example", mode: "trusted" });
+
+    expect(storage.get).toHaveBeenCalledWith(null);
+    expect(storage.get.mock.calls.filter(([key]) => key === null)).toHaveLength(2);
+  });
+
   it("rejects a set-tab request when the tab redirected away from the displayed origin", async () => {
     const deps = {
       storage: { get: vi.fn().mockResolvedValue({}), set: vi.fn() },

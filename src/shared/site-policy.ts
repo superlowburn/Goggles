@@ -167,7 +167,9 @@ async function migrateSocialPolicies(area: StorageArea): Promise<void> {
 export function prepareSocialPolicies(area: StorageArea): Promise<void> {
   let migration = socialMigrationPromises.get(area);
   if (!migration) {
-    migration = migrateSocialPolicies(area);
+    migration = migrateSocialPolicies(area).catch(() => {
+      socialMigrationPromises.delete(area);
+    });
     socialMigrationPromises.set(area, migration);
   }
   return migration;
