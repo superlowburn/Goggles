@@ -95,3 +95,39 @@ Implemented and committed as `22c2178a78ab9c8894d4d7b5313bc5ce7aff2490`.
 ### Concerns
 
 - Delivery-level six-site visual QA remains assigned to Task 4; no live-site pass is claimed here.
+
+## Round 2 review fixes
+
+### Status
+
+Implemented and committed as `b7b96b3385f513d39aa266bd70ea073f5b1ab0e2`.
+
+### Red commands and expected failures
+
+- `npm run test:unit -- tests/unit/service-worker.test.ts -t "social policies|validated social"` — 2 expected failures: the worker rejected both new Settings policy messages before migration-gated handlers existed.
+- `npm run test:unit -- tests/unit/options.test.ts -t "worker migration"` — 1 expected failure: Settings still wrote storage directly, so no worker message serialized the user write behind the delayed migration.
+- `npm run test:unit -- tests/unit/content-controller.test.ts -t "fallback Always show"` — 1 expected failure: the fallback bootstrap never registered the Blocked Subjects listener, allowing its controller to start without the configured subject rule.
+- `npm run test:unit -- tests/unit/service-worker.test.ts -t "validated social"` — 1 expected failure in the sender-boundary refinement: a same-extension content-script sender was incorrectly accepted as a Settings sender.
+
+### Green commands and exact results
+
+- `npm run test:unit -- tests/unit/service-worker.test.ts -t "social policies|validated social"` — 1 file passed, 3 tests passed, 12 skipped.
+- `npm run test:unit -- tests/unit/options.test.ts -t "worker migration"` — 1 file passed, 1 test passed, 9 skipped.
+- `npm run test:unit -- tests/unit/content-controller.test.ts -t "fallback Always show"` — 1 file passed, 1 test passed, 46 skipped.
+- `npm run test:unit -- tests/unit/service-worker.test.ts -t "validated social"` — 1 file passed, 1 test passed, 14 skipped; `npm run typecheck` exited 0.
+- `npm run test:unit -- tests/unit/options.test.ts tests/unit/service-worker.test.ts tests/unit/content-controller.test.ts tests/unit/popup.test.ts tests/unit/site-policy.test.ts` — 5 files passed, 117 tests passed.
+- Fresh final `npm run typecheck` — exit 0.
+- Fresh final `npm run test:unit` — 19 files passed, 234 tests passed.
+- Fresh final `npm run build` — exit 0.
+- Fresh final `git diff --check` — exit 0.
+
+### Self-review
+
+- Settings reads and writes all social switches through the service worker's existing `policyReady` promise, so a delayed legacy migration finishes before the later user write and cannot overwrite it.
+- The worker validates the platform and mode and accepts these Settings-only messages only from its own extension page, rejecting other extensions and content-script senders before storage access.
+- Settings validates the worker's complete effective-policy response before rendering and rolls a switch back if its write rejects or returns a mismatched response.
+- Fallback bootstrap registers the Blocked Subjects watcher before its asynchronous read, preserves a newer watcher value during the read, disposes cleanly, and starts with the effective configured subjects. Always show therefore trusts ordinary media while matching subjects remain frosted.
+
+### Concerns
+
+- Delivery-level six-site visual QA remains assigned to Task 4; no live-site pass is claimed here.
