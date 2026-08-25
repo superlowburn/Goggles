@@ -6,11 +6,11 @@ const origin = "http://127.0.0.1:4173";
 
 test("applies popup-equivalent site and subject changes live without reloading", async () => {
   const context = await chromium.launchPersistentContext("", {
-    headless: false,
+    channel: "chromium",
+    headless: true,
     viewport: { width: 427, height: 240 },
     args: [
       "--window-size=427,240",
-      "--window-position=-10000,-10000",
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
     ],
@@ -95,11 +95,11 @@ test("applies popup-equivalent site and subject changes live without reloading",
 
 test("keeps a blocked subject frosted on an otherwise Trusted site", async () => {
   const context = await chromium.launchPersistentContext("", {
-    headless: false,
+    channel: "chromium",
+    headless: true,
     viewport: { width: 427, height: 240 },
     args: [
       "--window-size=427,240",
-      "--window-position=-10000,-10000",
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
     ],

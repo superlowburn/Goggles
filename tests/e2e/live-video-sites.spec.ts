@@ -1,226 +1,162 @@
-import { chromium, expect, test, type Frame, type Locator, type Page } from "@playwright/test";
+import { chromium, expect, test, type BrowserContext, type Locator, type Page } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
+import { dismissFirstRun, extensionWorker } from "./extension-storage";
 
 const runLiveQa = process.env.GOGGLES_LIVE_VIDEO_QA === "1";
 const extensionPath = resolve("dist");
-const screenshotDir = resolve(".gstack/qa-reports/screenshots/subject-first");
+const screenshotDir = resolve(".gstack/qa-reports/screenshots/v0.2");
+const providerUrl = "https://www.youtube.com/embed/goggles-v02-qa?autoplay=1&start=12";
+const protectedAttribute = "data-eclipse-goggles-protected";
 
 const sites = [
-  {
-    name: "Reddit",
-    slug: "reddit",
-    url: "https://www.reddit.com/r/MTB/comments/1ug8hoy/loamerrr/",
-  },
-  { name: "CNN", slug: "cnn", url: "https://www.cnn.com/videos" },
-  { name: "The New York Times", slug: "nyt", url: "https://www.nytimes.com/video" },
-  { name: "Fox News", slug: "fox", url: "https://www.foxnews.com/video/6340564197112" },
+  { name: "Reddit", slug: "reddit", social: true, url: "https://www.reddit.com/" },
+  { name: "CNN", slug: "cnn", social: false, url: "https://www.cnn.com/" },
+  { name: "The New York Times", slug: "nyt", social: false, url: "https://www.nytimes.com/" },
+  { name: "Fox News", slug: "fox", social: false, url: "https://www.foxnews.com/" },
   {
     name: "The Washington Post",
     slug: "washington-post",
-    url: "https://www.washingtonpost.com/video/travel/what-does-a-100-hotel-in-new-york-city-get-you/2026/08/07/0dc493a8-0c91-4f10-a869-f6fd20d7ff9e_video.html",
+    social: false,
+    url: "https://www.washingtonpost.com/",
   },
-  { name: "The Wall Street Journal", slug: "wsj", url: "https://www.wsj.com/video" },
+  { name: "The Wall Street Journal", slug: "wsj", social: false, url: "https://www.wsj.com/" },
 ] as const;
 
-type ProtectedVideo = {
-  frame: Frame;
-  target: Locator;
-  kind: "native" | "provider";
+type VideoState = {
+  autoplay: boolean;
+  currentTime: number;
+  hasOwnPlay: boolean;
+  muted: boolean;
+  paused: boolean;
+  playbackRate: number;
+  src: string | null;
+  srcObjectId: string | undefined;
+  volume: number;
 };
 
-test("top-clipped alignment requires a bounded clip and meaningful reveal surface", () => {
-  const target = { x: 0, y: 0, width: 427, height: 480 };
-  expect(isAlignedTopClippedLayer(target, { x: 0, y: 56, width: 427, height: 424 })).toBe(true);
-  expect(isAlignedTopClippedLayer(target, { x: 0, y: 479, width: 427, height: 1 })).toBe(false);
-  expect(isAlignedTopClippedLayer(target, { x: 0, y: 121, width: 427, height: 359 })).toBe(false);
-
-  const outgoingTarget = { x: 0, y: -380, width: 427, height: 480 };
-  expect(isAlignedTopClippedLayer(outgoingTarget, { x: 0, y: 56, width: 427, height: 44 })).toBe(true);
-  expect(isAlignedTopClippedLayer(outgoingTarget, { x: 0, y: 99, width: 427, height: 1 })).toBe(false);
-});
-
-test.describe("live-site video frosting", () => {
+test.describe("v0.2 live-site visual QA", () => {
   test.skip(!runLiveQa, "Set GOGGLES_LIVE_VIDEO_QA=1 to run public-site acceptance tests.");
-  test.describe.configure({ timeout: 90_000 });
+  test.describe.configure({ timeout: 120_000 });
 
   for (const site of sites) {
-    test(`${site.name}: one-click video reveal and re-frost`, async () => {
+    test(`${site.name}: defaults, contextual controls, subjects, and visual-only video`, async () => {
       await mkdir(screenshotDir, { recursive: true });
-      const context = await chromium.launchPersistentContext("", {
-        headless: false,
-        viewport: { width: 427, height: 240 },
-        args: [
-          "--window-position=-10000,-10000",
-          "--window-size=427,240",
-          `--disable-extensions-except=${extensionPath}`,
-          `--load-extension=${extensionPath}`,
-        ],
-      });
+      const context = await launchExtension();
       const extensionErrors: string[] = [];
 
       try {
-        await (context.serviceWorkers()[0] ?? context.waitForEvent("serviceworker"));
-        const page = context.pages()[0] ?? await context.newPage();
+        const worker = await extensionWorker(context);
+        await dismissFirstRun(context);
+        const page = await context.newPage();
         page.on("pageerror", (error) => {
-          if (/goggles|chrome-extension/iu.test(error.message)) extensionErrors.push(error.message);
+          if (/chrome-extension:\/\/|^Goggles:/u.test(error.message)) extensionErrors.push(error.message);
         });
         page.on("console", (message) => {
-          if (message.type() === "error" && /goggles|chrome-extension/iu.test(message.text())) {
+          if (message.type() === "error" && /chrome-extension:\/\/|^Goggles:/u.test(message.text())) {
             extensionErrors.push(message.text());
           }
         });
 
-        await navigate(page, site.url);
-        await settleAndScroll(page);
-        let protectedVideo = await findProtectedVideo(page);
-        if (!protectedVideo && site.slug === "nyt" && await openFirstVideoStory(page)) {
-          await settleAndScroll(page);
-          protectedVideo = await findProtectedVideo(page);
-        }
-
-        if (!protectedVideo) {
-          await page.screenshot({
-            path: resolve(screenshotDir, `live-${site.slug}-before.png`),
-            fullPage: false,
-            timeout: 5_000,
-          });
-          const diagnostic = await diagnoseMissingVideo(page);
-          throw new Error(`${site.name} did not expose a frostable video. ${diagnostic}`);
-        }
-
-        let cookieBlocker: string | null = null;
-        if (site.slug === "cnn") {
-          cookieBlocker = await dismissCnnCookieOverlay(page);
-          protectedVideo = await findProtectedVideo(page);
-          if (!protectedVideo) {
-            await page.screenshot({
-              path: resolve(screenshotDir, `live-${site.slug}-before.png`),
-              fullPage: false,
-              timeout: 5_000,
-            });
-            const diagnostic = await diagnoseMissingVideo(page);
-            throw new Error(cookieBlocker ?? `CNN replaced the selected video after cookie consent. ${diagnostic}`);
-          }
-        }
-
-        const { frame, target, kind } = protectedVideo;
-        await alignTarget(page, target);
+        const navigation = await navigate(page, site.url);
+        await page.waitForTimeout(3_000);
+        if (site.slug === "cnn") await dismissCnnCookieConsent(page);
+        const blocker = await accessBlocker(page, navigation.response?.status(), navigation.error);
         await page.screenshot({
-          path: resolve(screenshotDir, `live-${site.slug}-before.png`),
+          path: resolve(screenshotDir, `${site.slug}-default.png`),
           fullPage: false,
-          timeout: 5_000,
         });
-        if (cookieBlocker) throw new Error(cookieBlocker);
-        await expect(target).toHaveAttribute("data-eclipse-goggles-protected", "video");
-        const issues: string[] = [];
-        const beforeFrosts = await countOverlappingLayers(frame, target, ".eg-layer.eg-frost");
-        if (beforeFrosts !== 1) {
-          const overlaps = await describeOverlappingProtectedTargets(frame, target);
-          issues.push(`expected 1 frost layer before reveal; found ${beforeFrosts}: ${JSON.stringify(overlaps)}`);
-        }
+        test.skip(Boolean(blocker), blocker ?? undefined);
 
-        if (kind === "native") {
-          const state = await mediaState(target);
-          if (!state.paused || !state.muted) issues.push(`native video was not secured before reveal: ${JSON.stringify(state)}`);
-        }
-
-        const topLevelUrl = page.url();
-        const revealSurface = await revealSurfaceForTarget(frame, target);
-        let clickFailure: string | null = null;
-        let clickBlockers: unknown[] = [];
-        let clickRootDiagnostics: unknown[] = [];
-        if (!revealSurface) {
-          issues.push("protected video had no aligned reveal surface");
+        if (site.social) {
+          await expect.poll(() => page.locator(`[${protectedAttribute}]`).count()).toBeGreaterThan(0);
         } else {
-          await revealSurface.evaluate((button) => {
-            button.addEventListener("click", (event) => {
-              button.setAttribute("data-live-click-trusted", String(event.isTrusted));
-            }, { capture: true, once: true });
-          });
-          try {
-            await revealSurface.click({ timeout: 5_000 });
-          } catch (error) {
-            clickFailure = error instanceof Error ? error.message : String(error);
-            clickBlockers = await protectedTargetsAtPoint(frame, revealSurface);
-            clickRootDiagnostics = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("[data-eclipse-goggles-root]")]
-              .filter((root) => root.closest("aside"))
-              .map((root) => {
-                const layer = root.shadowRoot?.querySelector<HTMLElement>(".eg-layer") ?? null;
-                const rect = root.getBoundingClientRect();
-                const layerRect = layer?.getBoundingClientRect();
-                return {
-                  pointerEvents: getComputedStyle(root).pointerEvents,
-                  rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-                  layerClass: layer?.className ?? null,
-                  layerRect: layerRect && {
-                    x: layerRect.x,
-                    y: layerRect.y,
-                    width: layerRect.width,
-                    height: layerRect.height,
-                  },
-                };
-              }));
-          }
-        }
-        const revealTimeline = [];
-        let elapsed = 0;
-        for (const delay of [0, 50, 150, 800]) {
-          await page.waitForTimeout(delay);
-          elapsed += delay;
-          revealTimeline.push({
-            elapsed,
-            protected: await target.getAttribute("data-eclipse-goggles-protected").catch(() => "detached"),
-            revealSurface: Boolean(await revealSurfaceForTarget(frame, target).catch(() => null)),
-            protectAgain: Boolean(await protectAgainForTarget(frame, target).catch(() => null)),
-            clickTrusted: await revealSurface?.getAttribute("data-live-click-trusted").catch(() => null),
-          });
-        }
-        const stillProtected = await target.getAttribute("data-eclipse-goggles-protected").catch(() => "detached");
-        if (stillProtected !== null) {
-          issues.push(`one click did not reveal the selected video: ${JSON.stringify({ revealTimeline, clickFailure, clickBlockers, clickRootDiagnostics })}`);
-        }
-        if (page.url() !== topLevelUrl) issues.push(`reveal activated the underlying destination: ${page.url()}`);
-        const afterFrosts = await countOverlappingLayers(frame, target, ".eg-layer.eg-frost").catch(() => -1);
-        if (afterFrosts !== 0) issues.push(`one click left ${afterFrosts} frost layer(s) over the video`);
-
-        if (kind === "native" && stillProtected === null) {
-          const state = await mediaState(target);
-          if (!state.paused || !state.muted) issues.push(`native video started or unmuted on reveal: ${JSON.stringify(state)}`);
+          await expect(page.locator(`[${protectedAttribute}]`)).toHaveCount(0);
         }
 
-        await alignTarget(page, target);
+        await installQaMedia(page);
+        const image = page.locator("#goggles-v02-image");
+        const video = page.locator("#goggles-v02-video");
+        const provider = page.locator("#goggles-v02-provider");
+        await expect(image).toBeVisible();
+        await video.evaluate((node) => (node as HTMLVideoElement).play());
+        await expect.poll(() => video.evaluate((node) => (node as HTMLVideoElement).paused)).toBe(false);
+        const videoBefore = await videoState(video);
+        const providerBefore = await provider.getAttribute("src");
+
+        if (!site.social) {
+          await expect(image).not.toHaveAttribute(protectedAttribute, "image");
+          const alwaysFrost = await alignedButton(page, image, "Always frost images here");
+          await alwaysFrost.focus();
+          await page.keyboard.press("Enter");
+        }
+
+        await expect(image).toHaveAttribute(protectedAttribute, "image");
+        await expect(video).toHaveAttribute(protectedAttribute, "video");
+        await expect(provider).toHaveAttribute(protectedAttribute, "video");
+        await expect.poll(() => overlappingLayers(page, image)).toBe(1);
+        await expect.poll(() => overlappingLayers(page, video)).toBe(1);
+        await expect.poll(() => overlappingLayers(page, provider)).toBe(1);
+        const imageReveal = await alignedButton(page, image, /Reveal protected media:/u);
+        await imageReveal.focus();
         await page.screenshot({
-          path: resolve(screenshotDir, `live-${site.slug}-after-one-click.png`),
+          path: resolve(screenshotDir, `${site.slug}-frosted.png`),
           fullPage: false,
-          timeout: 5_000,
         });
 
-        if (stillProtected === null && afterFrosts === 0) {
-          const protectAgain = await protectAgainForTarget(frame, target);
-          if (!protectAgain) {
-            issues.push("revealed video had no aligned Frost again control");
-          } else {
-            await expect(protectAgain).toBeVisible();
-            await protectAgain.click({ force: true, timeout: 5_000 });
-            await page.waitForTimeout(500);
-            const refrosted = await target.getAttribute("data-eclipse-goggles-protected");
-            if (refrosted !== "video") issues.push("Frost again did not re-frost the video");
-            const refrostCount = await countOverlappingLayers(frame, target, ".eg-layer.eg-frost");
-            if (refrostCount !== beforeFrosts) {
-              issues.push(`re-frost changed the layer count from ${beforeFrosts} to ${refrostCount}`);
-            }
-          }
-        }
+        const topUrl = page.url();
+        await imageReveal.click();
+        await expect(image).not.toHaveAttribute(protectedAttribute, "image");
+        expect(page.url()).toBe(topUrl);
+        await (await alignedButton(page, image, "Frost again")).click();
+        await expect(image).toHaveAttribute(protectedAttribute, "image");
+        await (await alignedButton(page, image, /Reveal protected media:/u)).click();
+        await (await alignedButton(page, image, "Always show images here")).click();
 
-        await alignTarget(page, target);
-        await page.screenshot({
-          path: resolve(screenshotDir, `live-${site.slug}-refrosted.png`),
-          fullPage: false,
-          timeout: 5_000,
+        await expect(image).not.toHaveAttribute(protectedAttribute, "image");
+        await expect(video).not.toHaveAttribute(protectedAttribute, "video");
+        await expect(provider).not.toHaveAttribute(protectedAttribute, "video");
+        const videoAfter = await videoState(video);
+        expect({ ...videoAfter, currentTime: videoBefore.currentTime }).toEqual(videoBefore);
+        expect(videoAfter.currentTime).toBeGreaterThanOrEqual(videoBefore.currentTime);
+        expect(await provider.getAttribute("src")).toBe(providerBefore);
+
+        await worker.evaluate(() => chrome.storage.local.set({
+          "blocked-subjects": {
+            enabled: true,
+            keywords: ["Goggles blocked subject fixture"],
+          },
+        }));
+        await page.evaluate(() => {
+          const subject = document.createElement("img");
+          subject.id = "goggles-v02-subject";
+          subject.alt = "Goggles blocked subject fixture";
+          subject.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='420' height='236'%3E%3Crect width='420' height='236' fill='%23b08352'/%3E%3C/svg%3E";
+          Object.assign(subject.style, { display: "block", width: "420px", height: "236px" });
+          document.querySelector("#goggles-v02-stage")!.append(subject);
+
+          const ordinary = document.createElement("img");
+          ordinary.id = "goggles-v02-future";
+          ordinary.alt = "Unrelated future media fixture";
+          ordinary.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='420' height='236'%3E%3Crect width='420' height='236' fill='%236e8c9c'/%3E%3C/svg%3E";
+          Object.assign(ordinary.style, { display: "block", width: "420px", height: "236px" });
+          document.querySelector("#goggles-v02-stage")!.append(ordinary);
         });
-        if (extensionErrors.length) issues.push(`extension errors: ${extensionErrors.join(" | ")}`);
-        expect(issues, `${site.name} video-frosting acceptance failures`).toEqual([]);
+        await expect(page.locator("#goggles-v02-subject")).toHaveAttribute(protectedAttribute, "image");
+        await expect(page.locator("#goggles-v02-future")).not.toHaveAttribute(protectedAttribute, "image");
+        await expect(page.getByRole("button", { name: /Reveal blocked subject:/u })).toHaveCount(1);
+        await expect(page.locator("[data-eclipse-goggles-root] .eg-layer").count()).resolves.toBeGreaterThan(0);
+
+        await page.reload({ waitUntil: "domcontentloaded", timeout: 45_000 });
+        await page.waitForTimeout(2_000);
+        await expect(page.locator(`[${protectedAttribute}]`)).toHaveCount(0);
+        await page.goto(`${site.url}?goggles-v02-navigation=1`, {
+          waitUntil: "domcontentloaded",
+          timeout: 45_000,
+        });
+        await page.waitForTimeout(2_000);
+        await expect(page.locator(`[${protectedAttribute}]`)).toHaveCount(0);
+        expect(extensionErrors).toEqual([]);
       } finally {
         await context.close();
       }
@@ -228,263 +164,170 @@ test.describe("live-site video frosting", () => {
   }
 });
 
-async function alignTarget(page: Page, target: Locator): Promise<void> {
-  await target.scrollIntoViewIfNeeded();
-  await page.waitForTimeout(500);
+async function launchExtension(): Promise<BrowserContext> {
+  const context = await chromium.launchPersistentContext("", {
+    channel: "chromium",
+    headless: true,
+    viewport: { width: 480, height: 320 },
+    args: [
+      "--window-size=480,320",
+      `--disable-extensions-except=${extensionPath}`,
+      `--load-extension=${extensionPath}`,
+    ],
+  });
+  await context.route(providerUrl, (route) => route.fulfill({
+    body: "<!doctype html><html><body>Provider fixture</body></html>",
+    contentType: "text/html",
+  }));
+  return context;
 }
 
-async function dismissCnnCookieOverlay(page: Page): Promise<string | null> {
+async function navigate(page: Page, url: string): Promise<{
+  error: string | null;
+  response: Awaited<ReturnType<Page["goto"]>>;
+}> {
+  try {
+    return {
+      error: null,
+      response: await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 }),
+    };
+  } catch (error) {
+    return {
+      error: error instanceof Error ? error.message.split("\n")[0]! : String(error),
+      response: null,
+    };
+  }
+}
+
+async function accessBlocker(
+  page: Page,
+  status?: number,
+  navigationError?: string | null,
+): Promise<string | null> {
+  const text = (await page.locator("body").innerText({ timeout: 5_000 }).catch(() => "")).toLowerCase();
+  const phrase = [
+    "verify you are human",
+    "verification required",
+    "confirm that you are human",
+    "access denied",
+    "captcha",
+    "our use of cookies and other technologies",
+    "subscribe to continue",
+    "sign in to continue",
+  ].find((candidate) => text.includes(candidate));
+  if (navigationError) return `Navigation blocker on ${page.url()}: ${navigationError}`;
+  if (status && status >= 400) return `HTTP ${status} blocked ${page.url()}`;
+  return phrase ? `Access blocker on ${page.url()}: ${phrase}` : null;
+}
+
+async function dismissCnnCookieConsent(page: Page): Promise<void> {
   for (const frame of page.frames()) {
     const accept = frame.getByRole("button", { name: /Accept All Cookies/iu }).first();
-    if (await accept.isVisible().catch(() => false)) {
-      await accept.click({ force: true, timeout: 5_000 }).catch(() => undefined);
-      await page.waitForTimeout(3_000);
-      break;
+    if (!await accept.isVisible().catch(() => false)) continue;
+    await accept.click({ timeout: 5_000 }).catch(() => undefined);
+    await page.waitForTimeout(2_000);
+    return;
+  }
+}
+
+async function installQaMedia(page: Page): Promise<void> {
+  await page.evaluate((source) => {
+    const stage = document.createElement("section");
+    stage.id = "goggles-v02-stage";
+    Object.assign(stage.style, {
+      background: "white",
+      color: "black",
+      display: "block",
+      isolation: "isolate",
+      padding: "16px",
+      position: "relative",
+      width: "452px",
+      zIndex: "2147483000",
+    });
+    const link = document.createElement("a");
+    link.href = "/goggles-v02-must-not-navigate";
+    const image = document.createElement("img");
+    image.id = "goggles-v02-image";
+    image.alt = "Goggles linked image fixture";
+    image.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='420' height='236'%3E%3Crect width='420' height='236' fill='%237aa0b8'/%3E%3Ccircle cx='95' cy='118' r='72' fill='%23e56e52'/%3E%3Crect x='195' y='38' width='180' height='160' fill='%23629a65'/%3E%3Ctext x='210' y='128' font-size='30' fill='white'%3EGoggles QA%3C/text%3E%3C/svg%3E";
+    link.append(image);
+    const video = document.createElement("video");
+    video.id = "goggles-v02-video";
+    video.autoplay = true;
+    video.setAttribute("aria-label", "Goggles native video fixture");
+    const canvas = document.createElement("canvas");
+    canvas.width = 16;
+    canvas.height = 9;
+    canvas.getContext("2d")!.fillRect(0, 0, 16, 9);
+    video.srcObject = canvas.captureStream(2);
+    const provider = document.createElement("iframe");
+    provider.id = "goggles-v02-provider";
+    provider.title = "Goggles provider video fixture";
+    provider.src = source;
+    for (const media of [image, video, provider]) {
+      Object.assign(media.style, {
+        border: "0",
+        display: "block",
+        height: "236px",
+        margin: "8px 0",
+        maxWidth: "none",
+        width: "420px",
+      });
     }
-  }
-
-  for (const frame of page.frames()) {
-    const heading = frame.getByText("Our use of cookies and other technologies", {
-      exact: false,
-    }).first();
-    if (await heading.isVisible().catch(() => false)) {
-      return "CNN cookie consent overlay remained over the selected video";
-    }
-  }
-  return null;
+    stage.append(link, video, provider);
+    document.body.prepend(stage);
+    window.scrollTo(0, 0);
+  }, providerUrl);
 }
 
-async function settleAndScroll(page: Page): Promise<void> {
-  await page.waitForTimeout(4_000);
-  for (const position of [0.25, 0.5, 0.75, 1]) {
-    await page.evaluate((ratio) => {
-      window.scrollTo({ top: document.documentElement.scrollHeight * ratio, behavior: "instant" });
-    }, position);
-    await page.waitForTimeout(1_000);
-    if (await findProtectedVideo(page)) return;
-  }
-  await page.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" }));
-  await page.waitForTimeout(1_000);
-}
-
-async function navigate(page: Page, url: string): Promise<void> {
-  try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 });
-  } catch (error) {
-    if (!(error instanceof Error) || !error.message.includes("net::ERR_ABORTED")) throw error;
-    await page.waitForTimeout(3_000);
-    if (page.url() === "about:blank") throw error;
-  }
-}
-
-async function findProtectedVideo(page: Page): Promise<ProtectedVideo | null> {
-  for (const frame of page.frames()) {
-    const candidates = frame.locator('[data-eclipse-goggles-protected="video"]');
-    for (let index = 0; index < await candidates.count(); index += 1) {
-      const target = candidates.nth(index);
-      const box = await target.boundingBox().catch(() => null);
-      if (!box || box.width < 160 || box.height < 90) continue;
-      await target.evaluate((node) => node.setAttribute("data-goggles-live-video-target", "selected"));
-      return {
-        frame,
-        target: frame.locator('[data-goggles-live-video-target="selected"]'),
-        kind: await target.evaluate((node) => node instanceof HTMLVideoElement)
-          ? "native"
-          : "provider",
-      };
-    }
-  }
-  return null;
-}
-
-async function protectAgainForTarget(frame: Frame, target: Locator): Promise<Locator | null> {
+async function alignedButton(page: Page, target: Locator, name: string | RegExp): Promise<Locator> {
   const targetBox = await target.boundingBox();
-  if (!targetBox) return null;
-  const buttons = frame.getByRole("button", { name: "Frost again", exact: true });
+  if (!targetBox) throw new Error("QA target is not visible");
+  const buttons = page.getByRole("button", { name });
   for (let index = 0; index < await buttons.count(); index += 1) {
     const button = buttons.nth(index);
     const box = await button.boundingBox().catch(() => null);
     if (!box) continue;
-    const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
     if (
-      center.x >= targetBox.x - 16 &&
-      center.x <= targetBox.x + targetBox.width + 16 &&
-      center.y >= targetBox.y - 16 &&
-      center.y <= targetBox.y + targetBox.height + 16
+      x >= targetBox.x && x <= targetBox.x + targetBox.width &&
+      y >= targetBox.y && y <= targetBox.y + targetBox.height
     ) return button;
   }
-  return null;
+  throw new Error(`No aligned ${String(name)} control found`);
 }
 
-async function revealSurfaceForTarget(frame: Frame, target: Locator): Promise<Locator | null> {
-  const targetBox = await target.boundingBox();
-  if (!targetBox) return null;
-  const buttons = frame.getByRole("button", { name: /Reveal protected media:/u });
-  for (let index = 0; index < await buttons.count(); index += 1) {
-    const button = buttons.nth(index);
-    const box = await button.boundingBox().catch(() => null);
-    if (box && isAlignedTopClippedLayer(targetBox, box)) return button;
-  }
-  return null;
-}
-
-async function openFirstVideoStory(page: Page): Promise<boolean> {
-  const href = await page.locator("a[href]").evaluateAll((anchors) => {
-    for (const anchor of anchors) {
-      const rawHref = anchor.getAttribute("href");
-      if (!rawHref) continue;
-      const candidate = new URL(rawHref, location.href);
-      if (candidate.hostname.endsWith("nytimes.com") && /^\/video\/.+/u.test(candidate.pathname)) {
-        return candidate.href;
-      }
-    }
-    return null;
-  });
-  if (!href) return false;
-  await page.goto(href, { waitUntil: "domcontentloaded", timeout: 45_000 });
-  return true;
-}
-
-async function countOverlappingLayers(frame: Frame, target: Locator, selector: string): Promise<number> {
+async function overlappingLayers(page: Page, target: Locator): Promise<number> {
   const targetBox = await target.boundingBox();
   if (!targetBox) return 0;
-  const layers = frame.locator(`[data-eclipse-goggles-root] ${selector}`);
-  let overlaps = 0;
+  const layers = page.locator("[data-eclipse-goggles-root] .eg-layer.eg-frost");
+  let count = 0;
   for (let index = 0; index < await layers.count(); index += 1) {
-    const layerBox = await layers.nth(index).boundingBox().catch(() => null);
-    if (layerBox && isAlignedTopClippedLayer(targetBox, layerBox)) overlaps += 1;
-  }
-  return overlaps;
-}
-
-async function describeOverlappingProtectedTargets(frame: Frame, target: Locator): Promise<unknown[]> {
-  const targetBox = await target.boundingBox();
-  if (!targetBox) return [];
-  const candidates = frame.locator("[data-eclipse-goggles-protected]");
-  const details = [];
-  for (let index = 0; index < await candidates.count(); index += 1) {
-    const candidate = candidates.nth(index);
-    const box = await candidate.boundingBox().catch(() => null);
-    if (!box || overlapRatio(targetBox, box) < 0.8) continue;
-    details.push(await candidate.evaluate((node) => ({
-      tag: node.tagName,
-      kind: node.getAttribute("data-eclipse-goggles-protected"),
-      ariaLabel: node.getAttribute("aria-label"),
-      alt: node.getAttribute("alt"),
-      className: (node.getAttribute("class") ?? "").slice(0, 160),
-      parentTag: node.parentElement?.tagName ?? null,
-      parentClass: (node.parentElement?.getAttribute("class") ?? "").slice(0, 160),
-      backgroundImage: getComputedStyle(node).backgroundImage.slice(0, 220),
-      nearestVideoAncestor: (() => {
-        let current: Element | null = node;
-        for (let depth = 0; current && depth < 20; depth += 1) {
-          if (current.querySelector("video")) {
-            return {
-              depth,
-              tag: current.tagName,
-              className: (current.getAttribute("class") ?? "").slice(0, 160),
-            };
-          }
-          current = current.parentElement;
-        }
-        return null;
-      })(),
-    })));
-  }
-  return details;
-}
-
-async function protectedTargetsAtPoint(frame: Frame, surface: Locator): Promise<unknown[]> {
-  const box = await surface.boundingBox();
-  if (!box) return [];
-  const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
-  const candidates = frame.locator("[data-eclipse-goggles-protected]");
-  const details = [];
-  for (let index = 0; index < await candidates.count(); index += 1) {
-    const candidate = candidates.nth(index);
-    const candidateBox = await candidate.boundingBox().catch(() => null);
+    const box = await layers.nth(index).boundingBox().catch(() => null);
+    if (!box) continue;
     if (
-      !candidateBox ||
-      point.x < candidateBox.x || point.x > candidateBox.x + candidateBox.width ||
-      point.y < candidateBox.y || point.y > candidateBox.y + candidateBox.height
-    ) continue;
-    details.push(await candidate.evaluate((node) => ({
-      tag: node.tagName,
-      kind: node.getAttribute("data-eclipse-goggles-protected"),
-      alt: node.getAttribute("alt"),
-      className: (node.getAttribute("class") ?? "").slice(0, 160),
-    })));
+      Math.abs(box.x - targetBox.x) <= 2 &&
+      Math.abs(box.width - targetBox.width) <= 2 &&
+      Math.abs(box.y + box.height - (targetBox.y + targetBox.height)) <= 2
+    ) count += 1;
   }
-  return details;
+  return count;
 }
 
-function overlapRatio(
-  target: { x: number; y: number; width: number; height: number },
-  layer: { x: number; y: number; width: number; height: number },
-): number {
-  const width = Math.max(0, Math.min(target.x + target.width, layer.x + layer.width) - Math.max(target.x, layer.x));
-  const height = Math.max(0, Math.min(target.y + target.height, layer.y + layer.height) - Math.max(target.y, layer.y));
-  return (width * height) / (target.width * target.height);
-}
-
-function isAlignedTopClippedLayer(
-  target: { x: number; y: number; width: number; height: number },
-  layer: { x: number; y: number; width: number; height: number },
-): boolean {
-  const tolerance = 2;
-  const visibleTargetTop = Math.max(0, target.y);
-  const visibleTargetHeight = Math.max(0, target.y + target.height - visibleTargetTop);
-  const topClip = Math.max(0, layer.y - visibleTargetTop);
-  const minimumSurfaceHeight = Math.min(24, visibleTargetHeight / 4);
-  return (
-    layer.height >= minimumSurfaceHeight &&
-    topClip <= 120 &&
-    layer.y >= target.y - tolerance &&
-    Math.abs(layer.x - target.x) <= tolerance &&
-    Math.abs(layer.width - target.width) <= tolerance &&
-    Math.abs(layer.y + layer.height - (target.y + target.height)) <= tolerance
-  );
-}
-
-async function mediaState(target: Locator): Promise<{ paused: boolean; muted: boolean }> {
-  return target.evaluate((node) => {
-    const video = node as HTMLVideoElement;
-    return { paused: video.paused, muted: video.muted };
+async function videoState(video: Locator): Promise<VideoState> {
+  return video.evaluate((node) => {
+    const media = node as HTMLVideoElement;
+    return {
+      autoplay: media.autoplay,
+      currentTime: media.currentTime,
+      hasOwnPlay: Object.hasOwn(media, "play"),
+      muted: media.muted,
+      paused: media.paused,
+      playbackRate: media.playbackRate,
+      src: media.getAttribute("src"),
+      srcObjectId: media.srcObject instanceof MediaStream ? media.srcObject.id : undefined,
+      volume: media.volume,
+    };
   });
-}
-
-async function diagnoseMissingVideo(page: Page): Promise<string> {
-  const details = [];
-  for (const frame of page.frames()) {
-    const frameDetails = await frame.evaluate(() => ({
-      nativeVideos: document.querySelectorAll("video").length,
-      protectedVideos: document.querySelectorAll('[data-eclipse-goggles-protected="video"]').length,
-      providerFrames: [...document.querySelectorAll("iframe")].filter((candidate) => {
-        const source = candidate.getAttribute("src") ?? "";
-        return /(?:youtube(?:-nocookie)?\.com\/embed\/|player\.vimeo\.com\/video\/)/iu.test(source);
-      }).length,
-      text: document.body?.innerText.slice(0, 2_000) ?? "",
-    })).catch(() => null);
-    if (frameDetails) details.push(frameDetails);
-  }
-  const text = details.map((detail) => detail.text).join(" ").toLowerCase();
-  const blocker = [
-    "verify you are human",
-    "verification required",
-    "confirm that you are human",
-    "slide right to secure your access",
-    "access denied",
-    "captcha",
-    "enable javascript",
-    "subscribe to continue",
-    "sign in to continue",
-  ].find((phrase) => text.includes(phrase));
-  const nativeVideos = details.reduce((sum, detail) => sum + detail.nativeVideos, 0);
-  const protectedVideos = details.reduce((sum, detail) => sum + detail.protectedVideos, 0);
-  const providerFrames = details.reduce((sum, detail) => sum + detail.providerFrames, 0);
-  return [
-    `final URL: ${page.url()}.`,
-    `DOM totals: ${nativeVideos} native video(s), ${providerFrames} recognized provider iframe(s), ${protectedVideos} protected video(s).`,
-    blocker ? `Likely blocker: \"${blocker}\".` : "No explicit access-wall text detected.",
-  ].join(" ");
 }

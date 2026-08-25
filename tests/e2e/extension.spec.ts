@@ -10,6 +10,7 @@ import {
 } from "@playwright/test";
 import { resolve } from "node:path";
 import { request as httpRequest } from "node:http";
+import { dismissFirstRun, firstRunPage, seedProtectedOrigin } from "./extension-storage";
 
 const extensionPath = resolve("dist");
 const projectRoot = resolve(".");
@@ -17,6 +18,7 @@ const fixtureOrigin = "http://127.0.0.1:4173";
 const protectedSelector = "[data-eclipse-goggles-protected]";
 const youtubeFixtureUrl = "https://www.youtube.com/embed/eclipse-test?autoplay=1";
 const vimeoFixtureUrl = "https://player.vimeo.com/video/123456789?autoplay=1";
+const redditFixtureUrl = "https://www.reddit.com/goggles-e2e/blocked-subjects.html";
 const videoProviderUrls = [
   youtubeFixtureUrl,
   vimeoFixtureUrl,
@@ -36,19 +38,22 @@ type LaunchedExtension = {
 async function launchExtension(
   options: {
     deviceScaleFactor?: number;
+    keepFirstRun?: boolean;
+    pageFixture?: { path: string; url: string };
     providerFixtureUrls?: readonly string[];
     providerResponseDelayMs?: number;
+    seedFixturePolicy?: boolean;
     unpackedPath?: string;
   } = {},
 ): Promise<LaunchedExtension> {
   const unpackedPath = options.unpackedPath ?? extensionPath;
   const context = await chromium.launchPersistentContext("", {
-    headless: false,
+    channel: "chromium",
+    headless: true,
     viewport: acceptanceWindow,
     ...(options.deviceScaleFactor === undefined ? {} : { deviceScaleFactor: options.deviceScaleFactor }),
     args: [
       `--window-size=${acceptanceWindow.width},${acceptanceWindow.height}`,
-      "--window-position=-10000,-10000",
       `--disable-extensions-except=${unpackedPath}`,
       `--load-extension=${unpackedPath}`,
     ],
@@ -60,12 +65,16 @@ async function launchExtension(
   context.on("request", (request) => {
     const url = request.url();
     if (isLocalRequest(url)) return;
+    if (url === options.pageFixture?.url) return;
     if (isApprovedProviderFixture(url, providerFixtureUrls)) return;
     if (providerAssetsAllowed && isProviderAsset(url)) return;
     unexpectedRequests.push(`${request.method()} ${request.resourceType()} ${url}`);
   });
   await context.route(/^https:\/\//, async (route) => {
     const url = route.request().url();
+    if (url === options.pageFixture?.url) {
+      return route.fulfill({ path: options.pageFixture.path, contentType: "text/html" });
+    }
     if (isApprovedProviderFixture(url, providerFixtureUrls)) {
       providerRequests.push(url);
       if (options.providerResponseDelayMs) {
@@ -82,7 +91,20 @@ async function launchExtension(
     return route.fallback();
   });
   const worker = context.serviceWorkers()[0] ?? await context.waitForEvent("serviceworker");
-  const page = context.pages()[0] ?? await context.newPage();
+  if (options.keepFirstRun) {
+    const page = await firstRunPage(context);
+    return {
+      context,
+      page,
+      worker,
+      unexpectedRequests,
+      providerRequests,
+      allowProviderAssets: () => { providerAssetsAllowed = true; },
+    };
+  }
+  if (options.seedFixturePolicy !== false) await seedProtectedOrigin(context, fixtureOrigin);
+  else await dismissFirstRun(context);
+  const page = await context.newPage();
   return {
     context,
     page,
@@ -192,6 +214,114 @@ test("fixture server is loopback-only and rejects traversal outside fixtures", a
   expect(await rawRequest("/%2e%2e/package.json")).toBe(400);
   expect(await rawRequest("/package.json")).toBe(404);
   expect(await rawRequest("/")).toBe(200);
+});
+
+test("defaults non-social media visible and persists contextual exact-origin frosting", async () => {
+  const extension = await launchExtension({ seedFixturePolicy: false });
+  const { page, worker } = extension;
+  try {
+    await worker.evaluate(() => chrome.storage.local.set({ "default-site-mode": "protected" }));
+    await page.goto(`${fixtureOrigin}/article.html`);
+    await expect(page.locator(protectedSelector)).toHaveCount(0);
+
+    const alwaysFrost = page.getByRole("button", { name: "Always frost images here" }).first();
+    await alwaysFrost.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#first")).toHaveAttribute("data-eclipse-goggles-protected", "image");
+    await expect(page.locator("#second")).toHaveAttribute("data-eclipse-goggles-protected", "image");
+    await expect.poll(() => worker.evaluate(async ({ key }) =>
+      (await chrome.storage.local.get(key))[key], { key: `site-policy:${fixtureOrigin}` }))
+      .toBe("protected");
+
+    await page.evaluate(() => {
+      const image = document.createElement("img");
+      image.id = "future-image";
+      image.alt = "A future exact-origin image";
+      image.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='640' height='360'/%3E";
+      Object.assign(image.style, { display: "block", width: "640px", height: "360px" });
+      document.body.append(image);
+    });
+    await expect(page.locator("#future-image")).toHaveAttribute(
+      "data-eclipse-goggles-protected",
+      "image",
+    );
+    await page.reload();
+    await expect(page.locator("#first")).toHaveAttribute("data-eclipse-goggles-protected", "image");
+  } finally {
+    await closeExtension(extension);
+  }
+});
+
+test("Always show reveals current and future ordinary media and persists the exact origin", async () => {
+  const extension = await launchExtension();
+  const { page, worker } = extension;
+  try {
+    await page.goto(`${fixtureOrigin}/article.html`);
+    await revealThisWithText(page, "A moonlit lake").click();
+    await page.getByRole("button", { name: "Always show images here" }).click();
+    await expect(page.locator(protectedSelector)).toHaveCount(0);
+    await expect.poll(() => worker.evaluate(async ({ key }) =>
+      (await chrome.storage.local.get(key))[key], { key: `site-policy:${fixtureOrigin}` }))
+      .toBe("trusted");
+
+    await page.evaluate(() => {
+      const image = document.createElement("img");
+      image.id = "future-visible-image";
+      image.alt = "A future visible image";
+      image.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='640' height='360'/%3E";
+      Object.assign(image.style, { display: "block", width: "640px", height: "360px" });
+      document.body.append(image);
+    });
+    await expect(page.locator("#future-visible-image")).not.toHaveAttribute(
+      "data-eclipse-goggles-protected",
+      "image",
+    );
+  } finally {
+    await closeExtension(extension);
+  }
+});
+
+test("defaults Reddit protected and keeps blocked subjects frosted when Reddit is switched Off", async () => {
+  const extension = await launchExtension({
+    pageFixture: {
+      path: resolve("tests/e2e/fixtures/blocked-subjects.html"),
+      url: redditFixtureUrl,
+    },
+    seedFixturePolicy: false,
+  });
+  const { page, worker } = extension;
+  try {
+    await worker.evaluate(() => chrome.storage.local.set({
+      "blocked-subjects": { enabled: true, keywords: ["Donald Trump", "Trump"] },
+    }));
+    await page.goto(redditFixtureUrl);
+    await expect(page.locator("#ordinary")).toHaveAttribute(
+      "data-eclipse-goggles-protected",
+      "image",
+    );
+    await expect(page.locator("#blocked")).toHaveAttribute(
+      "data-eclipse-goggles-protected",
+      "image",
+    );
+
+    await worker.evaluate(() => chrome.storage.local.set({ "social-policy:reddit": "trusted" }));
+    await expect(page.locator("#ordinary")).not.toHaveAttribute(
+      "data-eclipse-goggles-protected",
+      "image",
+    );
+    await expect(page.locator("#blocked")).toHaveAttribute(
+      "data-eclipse-goggles-protected",
+      "image",
+    );
+    await page.reload();
+    await expect(page.locator("#ordinary")).not.toHaveAttribute(
+      "data-eclipse-goggles-protected",
+      "image",
+    );
+    await expect(page.getByRole("button", { name: /Reveal blocked subject:/u })).toHaveCount(1);
+  } finally {
+    await closeExtension(extension);
+  }
 });
 
 test("launches the loaded extension in the compact acceptance window", async () => {
@@ -314,7 +444,7 @@ test("keeps the description control readable at the viewport edge", async () => 
 });
 
 test("ships the real icon and first-run settings page", async () => {
-  const extension = await launchExtension();
+  const extension = await launchExtension({ keepFirstRun: true });
   try {
     await expect.poll(() => extension.context.pages().map((page) => page.url()))
       .toContainEqual(expect.stringContaining("/options/options.html"));
@@ -322,7 +452,8 @@ test("ships the real icon and first-run settings page", async () => {
     await expect(optionsPage.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
     await expect(optionsPage.getByText("The Goggles, they do something.")).toBeVisible();
     await expect(optionsPage.getByRole("heading", { name: "Blocked subjects" })).toBeVisible();
-    await expect(optionsPage.getByRole("heading", { name: "Sites showing images and videos" })).toBeVisible();
+    await expect(optionsPage.getByRole("heading", { name: "Social platforms" })).toBeVisible();
+    await expect(optionsPage.getByRole("heading", { name: "Sites always frosted" })).toBeVisible();
     const manifest = await extension.worker.evaluate(() => chrome.runtime.getManifest());
     expect(manifest.icons).toEqual({
       "16": "icons/icon16.png",
@@ -572,22 +703,56 @@ test("visually frosts native video without changing its playback controls", asyn
   try {
     await page.goto(`${fixtureOrigin}/video.html`);
     const video = page.locator("#native-video");
+    await video.evaluate((node) => (node as HTMLVideoElement).play());
+    await expect.poll(() => video.evaluate((node) => (node as HTMLVideoElement).paused)).toBe(false);
     const before = await video.evaluate((node) => {
       const media = node as HTMLVideoElement;
-      return { hasOwnPlay: Object.hasOwn(media, "play"), muted: media.muted };
+      return {
+        autoplay: media.autoplay,
+        currentTime: media.currentTime,
+        hasOwnPlay: Object.hasOwn(media, "play"),
+        muted: media.muted,
+        paused: media.paused,
+        playbackRate: media.playbackRate,
+        src: media.getAttribute("src"),
+        srcObjectId: media.srcObject instanceof MediaStream ? media.srcObject.id : undefined,
+        volume: media.volume,
+      };
     });
     await expect(video).toHaveAttribute("data-eclipse-goggles-protected", "video");
     expect(await video.evaluate((node) => {
       const media = node as HTMLVideoElement;
-      return { hasOwnPlay: Object.hasOwn(media, "play"), muted: media.muted };
+      return {
+        autoplay: media.autoplay,
+        currentTime: media.currentTime,
+        hasOwnPlay: Object.hasOwn(media, "play"),
+        muted: media.muted,
+        paused: media.paused,
+        playbackRate: media.playbackRate,
+        src: media.getAttribute("src"),
+        srcObjectId: media.srcObject instanceof MediaStream ? media.srcObject.id : undefined,
+        volume: media.volume,
+      };
     })).toEqual(before);
 
     await scrollDockIntoView(video, layerWithText(page, "A looping color field"));
     await revealThisWithText(page, "A looping color field").click();
     await expect(video).not.toHaveAttribute("data-eclipse-goggles-protected", "video");
+    await page.getByRole("button", { name: "Frost again", exact: true }).click();
+    await expect(video).toHaveAttribute("data-eclipse-goggles-protected", "video");
     expect(await video.evaluate((node) => {
       const media = node as HTMLVideoElement;
-      return { hasOwnPlay: Object.hasOwn(media, "play"), muted: media.muted };
+      return {
+        autoplay: media.autoplay,
+        currentTime: media.currentTime,
+        hasOwnPlay: Object.hasOwn(media, "play"),
+        muted: media.muted,
+        paused: media.paused,
+        playbackRate: media.playbackRate,
+        src: media.getAttribute("src"),
+        srcObjectId: media.srcObject instanceof MediaStream ? media.srcObject.id : undefined,
+        volume: media.volume,
+      };
     })).toEqual(before);
   } finally {
     await closeExtension(extension);
@@ -608,8 +773,12 @@ test("visually frosts provider frames without changing their sources or autoplay
     await expect.poll(() => extension.providerRequests.length).toBe(3);
     expect(await extension.worker.evaluate(() => chrome.declarativeNetRequest)).toBeUndefined();
 
-    await scrollDockIntoView(youtube, layerWithText(page, "YouTube astronomy video"));
-    await revealThisWithText(page, "YouTube astronomy video").click();
+    const youtubeReveal = page.getByRole("button", {
+      name: "Reveal protected media: YouTube astronomy video",
+      exact: true,
+    });
+    await scrollDockIntoView(youtube, youtubeReveal.locator(".."));
+    await youtubeReveal.click();
     await page.getByRole("button", { name: "Frost again", exact: true }).click();
     await expect(youtube).toHaveAttribute("src", youtubeFixtureUrl);
     await expect(vimeo).toHaveAttribute("src", vimeoFixtureUrl);

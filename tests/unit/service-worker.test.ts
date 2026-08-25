@@ -21,8 +21,8 @@ describe("handleExtensionMessage", () => {
       { type: "policy:get-social" },
       {
         id: "extension-id",
-        url: "chrome-extension://extension-id/dist/options/options.html?source=menu#social",
-        tab: { id: 7, url: "chrome-extension://extension-id/dist/options/options.html?source=menu#social" },
+        url: "chrome-extension://extension-id/options/options.html?source=menu#social",
+        tab: { id: 7, url: "chrome-extension://extension-id/options/options.html?source=menu#social" },
       },
       deps,
     )).resolves.toEqual({

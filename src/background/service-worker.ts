@@ -49,7 +49,8 @@ function isOptionsSender(sender: MessageSender, extensionId: string): boolean {
     const url = new URL(sender.url);
     return url.protocol === "chrome-extension:" &&
       url.hostname === extensionId &&
-      url.pathname === "/dist/options/options.html";
+      (url.pathname === "/options/options.html" ||
+        url.pathname === "/dist/options/options.html");
   } catch {
     return false;
   }

@@ -1,5 +1,6 @@
 import { chromium, expect, test } from "@playwright/test";
 import { resolve } from "node:path";
+import { seedProtectedOrigin } from "./extension-storage";
 
 const fixtureUrl = "http://127.0.0.1:4173/stacked-images.html";
 const extensionPath = resolve("dist");
@@ -7,18 +8,18 @@ const windowSize = { width: 427, height: 240 } as const;
 
 test("protects only the meaningful foreground copy in a stacked image treatment", async () => {
   const context = await chromium.launchPersistentContext("", {
-    headless: false,
+    channel: "chromium",
+    headless: true,
     viewport: windowSize,
     args: [
       `--window-size=${windowSize.width},${windowSize.height}`,
-      "--window-position=-10000,-10000",
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
     ],
   });
 
   try {
-    await (context.serviceWorkers()[0] ?? context.waitForEvent("serviceworker"));
+    await seedProtectedOrigin(context, "http://127.0.0.1:4173");
     const page = context.pages()[0] ?? await context.newPage();
     await page.goto(fixtureUrl);
 
@@ -42,18 +43,18 @@ test("protects only the meaningful foreground copy in a stacked image treatment"
 
 test("uses one frost layer for a Reddit video with a gradient control scrim", async () => {
   const context = await chromium.launchPersistentContext("", {
-    headless: false,
+    channel: "chromium",
+    headless: true,
     viewport: windowSize,
     args: [
       `--window-size=${windowSize.width},${windowSize.height}`,
-      "--window-position=-10000,-10000",
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
     ],
   });
 
   try {
-    await (context.serviceWorkers()[0] ?? context.waitForEvent("serviceworker"));
+    await seedProtectedOrigin(context, "http://127.0.0.1:4173");
     const page = context.pages()[0] ?? await context.newPage();
     await page.goto("http://127.0.0.1:4173/reddit-video-stack.html");
 
@@ -84,18 +85,18 @@ test("uses one frost layer for a Reddit video with a gradient control scrim", as
 
 test("reveals a linked Reddit thumbnail without activating its destination", async () => {
   const context = await chromium.launchPersistentContext("", {
-    headless: false,
+    channel: "chromium",
+    headless: true,
     viewport: windowSize,
     args: [
       `--window-size=${windowSize.width},${windowSize.height}`,
-      "--window-position=-10000,-10000",
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
     ],
   });
 
   try {
-    await (context.serviceWorkers()[0] ?? context.waitForEvent("serviceworker"));
+    await seedProtectedOrigin(context, "http://127.0.0.1:4173");
     const page = context.pages()[0] ?? await context.newPage();
     await page.goto("http://127.0.0.1:4173/reddit-link.html");
     await page.getByRole("button", {
@@ -114,18 +115,18 @@ test("reveals a linked Reddit thumbnail without activating its destination", asy
 
 test("keeps the reveal surface clickable above a hostile page stacking context", async () => {
   const context = await chromium.launchPersistentContext("", {
-    headless: false,
+    channel: "chromium",
+    headless: true,
     viewport: windowSize,
     args: [
       `--window-size=${windowSize.width},${windowSize.height}`,
-      "--window-position=-10000,-10000",
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
     ],
   });
 
   try {
-    await (context.serviceWorkers()[0] ?? context.waitForEvent("serviceworker"));
+    await seedProtectedOrigin(context, "http://127.0.0.1:4173");
     const page = context.pages()[0] ?? await context.newPage();
     await page.goto("http://127.0.0.1:4173/stacking-context.html");
     const reveal = page.getByRole("button", { name: /Reveal protected media/ });
@@ -153,18 +154,18 @@ test("keeps the reveal surface clickable above a hostile page stacking context",
 
 test("reveals a linked Reddit shadow card without activating its destination", async () => {
   const context = await chromium.launchPersistentContext("", {
-    headless: false,
+    channel: "chromium",
+    headless: true,
     viewport: windowSize,
     args: [
       `--window-size=${windowSize.width},${windowSize.height}`,
-      "--window-position=-10000,-10000",
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
     ],
   });
 
   try {
-    await (context.serviceWorkers()[0] ?? context.waitForEvent("serviceworker"));
+    await seedProtectedOrigin(context, "http://127.0.0.1:4173");
     const page = context.pages()[0] ?? await context.newPage();
     await page.goto("http://127.0.0.1:4173/reddit-shadow-link.html");
     await page.getByRole("button", {

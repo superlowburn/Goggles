@@ -1,5 +1,6 @@
 import { chromium, expect, test, type Page } from "@playwright/test";
 import { resolve } from "node:path";
+import { seedProtectedOrigin } from "./extension-storage";
 
 const extensionPath = resolve("dist");
 
@@ -27,10 +28,10 @@ async function visibleAsideFrostsOverChild(page: Page): Promise<number> {
 // child-frame video on Fox News. Found by live QA on 2026-08-21.
 test("keeps child-frame video controls clickable below many parent media roots", async () => {
   const context = await chromium.launchPersistentContext("", {
-    headless: false,
+    channel: "chromium",
+    headless: true,
     viewport: { width: 427, height: 240 },
     args: [
-      "--window-position=-10000,-10000",
       "--window-size=427,240",
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
@@ -38,7 +39,7 @@ test("keeps child-frame video controls clickable below many parent media roots",
   });
 
   try {
-    await (context.serviceWorkers()[0] ?? context.waitForEvent("serviceworker"));
+    await seedProtectedOrigin(context, "http://127.0.0.1:4173");
     const page = context.pages()[0] ?? await context.newPage();
     await page.goto("http://127.0.0.1:4173/cross-frame-popover-stack.html");
     await expect(page.locator('aside [data-eclipse-goggles-protected="image"]')).toHaveCount(20);
@@ -66,10 +67,10 @@ test("keeps child-frame video controls clickable below many parent media roots",
 
 test("keeps the exposed frost interactive on a partially iframe-covered link", async () => {
   const context = await chromium.launchPersistentContext("", {
-    headless: false,
+    channel: "chromium",
+    headless: true,
     viewport: { width: 427, height: 240 },
     args: [
-      "--window-position=-10000,-10000",
       "--window-size=427,240",
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
@@ -77,7 +78,7 @@ test("keeps the exposed frost interactive on a partially iframe-covered link", a
   });
 
   try {
-    await (context.serviceWorkers()[0] ?? context.waitForEvent("serviceworker"));
+    await seedProtectedOrigin(context, "http://127.0.0.1:4173");
     const page = context.pages()[0] ?? await context.newPage();
     await page.goto("http://127.0.0.1:4173/cross-frame-popover-stack.html");
     const target = page.locator("#partial-target");

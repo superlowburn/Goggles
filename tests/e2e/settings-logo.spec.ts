@@ -10,10 +10,10 @@ async function openSettings(page: Page, workerUrl: string): Promise<void> {
 
 test("keeps the settings-page Goggles logo clear and centered", async ({}, testInfo) => {
   const context = await chromium.launchPersistentContext("", {
-    headless: false,
+    channel: "chromium",
+    headless: true,
     viewport: qaWindow,
     args: [
-      "--window-position=-10000,-10000",
       `--window-size=${qaWindow.width},${qaWindow.height}`,
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
@@ -76,10 +76,10 @@ test("keeps the settings-page Goggles logo clear and centered", async ({}, testI
 
 test("keeps the first settings controls in the opening desktop view", async () => {
   const context = await chromium.launchPersistentContext("", {
-    headless: false,
+    channel: "chromium",
+    headless: true,
     viewport: qaWindow,
     args: [
-      "--window-position=-10000,-10000",
       `--window-size=${qaWindow.width},${qaWindow.height}`,
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
@@ -103,10 +103,10 @@ test("keeps the first settings controls in the opening desktop view", async () =
 
 test("makes the blocked-subject controls and small labels visually clear", async () => {
   const context = await chromium.launchPersistentContext("", {
-    headless: false,
+    channel: "chromium",
+    headless: true,
     viewport: qaWindow,
     args: [
-      "--window-position=-10000,-10000",
       `--window-size=${qaWindow.width},${qaWindow.height}`,
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
