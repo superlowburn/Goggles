@@ -59,3 +59,39 @@ Implementation commit: `5a0338e4506329f2456918c1b3541bfda210a4bd`.
 
 - Repository-required six-site live visual QA is intentionally left for Task 4's integrated delivery gate. This task did not claim Reddit, CNN, NYT, Fox News, Washington Post, or WSJ passed.
 - The isolated base does not contain the user's uncommitted subject/name-suggestion refinements; the Blocked Subjects section was left structurally untouched so integration can retain them.
+
+## Round 1 review fixes
+
+### Status
+
+Implemented and committed as `22c2178a78ab9c8894d4d7b5313bc5ce7aff2490`.
+
+### Red commands and expected failures
+
+- `npm run test:unit -- tests/unit/content-controller.test.ts -t "falls back|fallback contextual"` — 3 expected failures: both failure fallbacks skipped policy watching, and a saved fallback action left the active media record trusted instead of reconciling to protected.
+- `npm run test:unit -- tests/unit/renderer.test.ts -t "revealed item crosses"` — 1 expected failure: a revealed item's Always show action remained after shrinking below `280x180`.
+- `npm run test:unit -- tests/unit/content-controller.test.ts -t "stale Always show"` — 1 expected failure: a retained revealed subject recreated stale Always show after Frost again and a second reveal on the now-trusted site.
+- `npm run test:unit -- tests/unit/options.test.ts -t "waits for legacy social migration"` — 1 expected failure: Settings rendered Reddit On from a legacy snapshot instead of awaiting migration to the trusted platform-family rule.
+
+### Green commands and exact results
+
+- `npm run test:unit -- tests/unit/content-controller.test.ts -t "falls back|fallback contextual"` — 1 file passed, 4 tests passed, 41 skipped.
+- `npm run test:unit -- tests/unit/renderer.test.ts -t "revealed item crosses"` — 1 file passed, 1 test passed, 37 skipped.
+- `npm run test:unit -- tests/unit/content-controller.test.ts -t "stale Always show"` — 1 file passed, 1 test passed, 45 skipped.
+- `npm run test:unit -- tests/unit/options.test.ts -t "waits for legacy social migration"` — 1 file passed, 1 test passed, 9 skipped; `npm run typecheck` exited 0.
+- `npm run test:unit -- tests/unit/content-controller.test.ts tests/unit/renderer.test.ts tests/unit/options.test.ts tests/unit/popup.test.ts tests/unit/service-worker.test.ts tests/unit/video-visual-only.test.ts` — 6 files passed, 118 tests passed.
+- Fresh final `npm run typecheck` — exit 0.
+- Fresh final `npm run test:unit` — 19 files passed, 231 tests passed.
+- Fresh final `npm run build` — exit 0.
+- Fresh final `git diff --check` — exit 0.
+
+### Self-review
+
+- Fallback bootstrap registers and disposes the same live policy watcher as the normal path, so a successful contextual write updates current and future media without reload.
+- One renderer synchronization path now adds/removes revealed actions on every layout update and clears saved actions so resize cannot resurrect them.
+- Retained revealed subject records refresh their current policy and site action without replacing or re-frosting the item; subsequent refrost/reveal uses trusted-site controls.
+- Settings waits for the shared serialized migration before taking its all-storage snapshot, rendering switches, or accepting writes.
+
+### Concerns
+
+- Delivery-level six-site visual QA remains assigned to Task 4; no live-site pass is claimed here.
