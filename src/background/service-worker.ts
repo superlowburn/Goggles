@@ -1,5 +1,5 @@
 import type { ExtensionMessage, PolicyContext } from "../shared/media-types";
-import { isSiteMode, migrateSocialPolicies, normalizeOrigin, SitePolicyStore } from "../shared/site-policy";
+import { isSiteMode, normalizeOrigin, prepareSocialPolicies, SitePolicyStore } from "../shared/site-policy";
 import { BlockedSubjectsStore } from "../shared/blocked-subjects";
 import { ProviderRequestGate } from "./provider-request-gate";
 
@@ -17,6 +17,7 @@ type WorkerDependencies = {
   tabs: { get(tabId: number): Promise<Tab> };
   openOptionsPage?: () => Promise<void>;
   providerGate?: Pick<ProviderRequestGate, "authorize" | "revoke">;
+  policyReady?: Promise<void>;
 };
 
 interface ProviderLifecycleGate {
@@ -103,6 +104,8 @@ export async function handleExtensionMessage(
 ): Promise<WorkerResponse> {
   if (!isExtensionMessage(message)) return { error: "invalid-message" };
 
+  await (deps.policyReady ?? prepareSocialPolicies(deps.storage));
+
   const store = new SitePolicyStore(deps.storage);
   const blockedSubjectsStore = new BlockedSubjectsStore(deps.storage);
 
@@ -164,7 +167,7 @@ export async function installProviderGateLifecycle(
 
 export function installFirstRun(runtime: FirstRunRuntime, storage?: StorageArea): void {
   runtime.onInstalled.addListener(({ reason }) => {
-    if (storage) void migrateSocialPolicies(storage);
+    if (storage) void prepareSocialPolicies(storage);
     if (reason === "install") void runtime.openOptionsPage();
   });
 }
@@ -186,9 +189,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     storage: chrome.storage.local,
     tabs: chrome.tabs,
     openOptionsPage: () => chrome.runtime.openOptionsPage(),
+    policyReady: productionPolicyReady,
   }).then(sendResponse);
   return true;
 });
 
-void migrateSocialPolicies(chrome.storage.local);
+const productionPolicyReady = prepareSocialPolicies(chrome.storage.local);
 if (chrome.runtime.onInstalled) installFirstRun(chrome.runtime, chrome.storage.local);

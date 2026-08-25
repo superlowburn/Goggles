@@ -16,6 +16,8 @@ type StorageChangeEvent = {
   removeListener(listener: StorageChangeListener): void;
 };
 
+const socialMigrationPromises = new WeakMap<StorageArea, Promise<void>>();
+
 const protectedMode: SiteMode = "protected";
 const trustedMode: SiteMode = "trusted";
 export const defaultPolicyKey = "default-site-mode";
@@ -143,7 +145,7 @@ export class SitePolicyStore {
   }
 }
 
-export async function migrateSocialPolicies(area: StorageArea): Promise<void> {
+async function migrateSocialPolicies(area: StorageArea): Promise<void> {
   const values = await area.get(null) ?? {};
   const updates: Record<string, SiteMode> = {};
 
@@ -160,4 +162,13 @@ export async function migrateSocialPolicies(area: StorageArea): Promise<void> {
   }
 
   if (Object.keys(updates).length > 0) await area.set(updates);
+}
+
+export function prepareSocialPolicies(area: StorageArea): Promise<void> {
+  let migration = socialMigrationPromises.get(area);
+  if (!migration) {
+    migration = migrateSocialPolicies(area);
+    socialMigrationPromises.set(area, migration);
+  }
+  return migration;
 }

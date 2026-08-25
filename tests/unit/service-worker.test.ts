@@ -5,7 +5,7 @@ import {
   installProviderGateLifecycle,
 } from "../../src/background/service-worker";
 import { defaultTrumpKeywords } from "../../src/shared/blocked-subjects";
-import { policyKey, socialPolicyKey } from "../../src/shared/site-policy";
+import { policyKey, prepareSocialPolicies, socialPolicyKey } from "../../src/shared/site-policy";
 
 describe("handleExtensionMessage", () => {
   it("returns the sender tab policy for the current page", async () => {
@@ -90,6 +90,40 @@ describe("handleExtensionMessage", () => {
       deps,
     )).resolves.toEqual({ origin: "https://old.reddit.com", mode: "trusted" });
     expect(deps.storage.set).toHaveBeenCalledWith({ [socialPolicyKey("reddit")]: "trusted" });
+  });
+
+  it("waits for shared migration before a social policy write", async () => {
+    const legacyKey = policyKey("https://old.reddit.com");
+    const platformKey = socialPolicyKey("reddit");
+    const values: Record<string, unknown> = { [legacyKey]: "trusted" };
+    let resolveMigrationRead!: (values: Record<string, unknown>) => void;
+    const storage = {
+      get: vi.fn((key: null | string | string[]) => key === null
+        ? new Promise<Record<string, unknown>>((resolve) => { resolveMigrationRead = resolve; })
+        : Promise.resolve(Object.fromEntries((Array.isArray(key) ? key : [key]).map((item) => [item, values[item]])))),
+      set: vi.fn(async (updates: Record<string, unknown>) => { Object.assign(values, updates); }),
+    };
+    const deps = {
+      storage,
+      tabs: { get: vi.fn().mockResolvedValue({ id: 7, url: "https://old.reddit.com/r/goggles" }) },
+    };
+
+    const migration = prepareSocialPolicies(storage);
+    const write = handleExtensionMessage({
+      type: "policy:set-tab",
+      tabId: 7,
+      mode: "protected",
+      expectedOrigin: "https://old.reddit.com",
+    }, {}, deps);
+    expect(storage.set).not.toHaveBeenCalled();
+
+    resolveMigrationRead({ ...values });
+    await migration;
+    await write;
+
+    expect(storage.set).toHaveBeenNthCalledWith(1, { [platformKey]: "trusted" });
+    expect(storage.set).toHaveBeenNthCalledWith(2, { [platformKey]: "protected" });
+    expect(values[platformKey]).toBe("protected");
   });
 
   it("rejects a set-tab request when the tab redirected away from the displayed origin", async () => {

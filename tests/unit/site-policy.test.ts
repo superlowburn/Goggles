@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   defaultPolicyKey,
-  migrateSocialPolicies,
+  prepareSocialPolicies,
   SitePolicyStore,
   policyKey,
   socialPlatformForOrigin,
@@ -136,6 +136,22 @@ describe("SitePolicyStore", () => {
       .resolves.toBe("protected");
   });
 
+  it.each([
+    ["facebook", "https://www.facebook.com"],
+    ["instagram", "https://instagram.com"],
+    ["reddit", "https://old.reddit.com"],
+    ["x", "https://mobile.x.com"],
+    ["x twitter alias", "https://mobile.twitter.com"],
+    ["tiktok", "https://www.tiktok.com"],
+    ["threads", "https://www.threads.net"],
+    ["bluesky", "https://staging.bsky.app"],
+    ["youtube", "https://music.youtube.com"],
+  ])("defaults %s to protected", async (_name, origin) => {
+    const store = new SitePolicyStore({ get: vi.fn().mockResolvedValue({}), set: vi.fn() });
+
+    await expect(store.get(origin)).resolves.toBe("protected");
+  });
+
   it("uses a legacy exact-origin social rule only while the platform rule is missing", async () => {
     const origin = "https://www.reddit.com";
     const area = {
@@ -197,7 +213,7 @@ describe("SitePolicyStore", () => {
   });
 });
 
-describe("migrateSocialPolicies", () => {
+describe("prepareSocialPolicies", () => {
   it("migrates an explicit trusted legacy social origin once without deleting it", async () => {
     const values: Record<string, unknown> = {
       [policyKey("https://old.reddit.com")]: "trusted",
@@ -207,8 +223,8 @@ describe("migrateSocialPolicies", () => {
       set: vi.fn(async (updates: Record<string, unknown>) => { Object.assign(values, updates); }),
     };
 
-    await migrateSocialPolicies(area);
-    await migrateSocialPolicies(area);
+    await prepareSocialPolicies(area);
+    await prepareSocialPolicies(area);
 
     expect(area.set).toHaveBeenCalledTimes(1);
     expect(area.set).toHaveBeenCalledWith({ [socialPolicyKey("reddit")]: "trusted" });
@@ -224,7 +240,7 @@ describe("migrateSocialPolicies", () => {
       set: vi.fn(),
     };
 
-    await migrateSocialPolicies(area);
+    await prepareSocialPolicies(area);
 
     expect(area.set).not.toHaveBeenCalled();
   });
