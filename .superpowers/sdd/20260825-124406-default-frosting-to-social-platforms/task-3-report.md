@@ -131,3 +131,34 @@ Implemented and committed as `b7b96b3385f513d39aa266bd70ea073f5b1ab0e2`.
 ### Concerns
 
 - Delivery-level six-site visual QA remains assigned to Task 4; no live-site pass is claimed here.
+
+## Round 3 review fix
+
+### Status
+
+Implemented and committed as `ef887be344dfa95e4a1fdbc64fa0cd4b6127bf9b`.
+
+### Red commands and expected failures
+
+- `npm run test:unit -- tests/unit/service-worker.test.ts -t "social policies|validated social"` — 2 expected failures: tab-shaped senders from the real Options URL were rejected by the prior no-tab rule, preventing both initial policy rendering and writes.
+- `npm run test:unit -- tests/unit/options.test.ts -t "worker migration"` after the sender fix — 1 fixture failure: the migration regression still supplied the old ID-only synthetic sender and was rejected by the new exact Options-page boundary.
+
+### Green commands and exact results
+
+- `npm run test:unit -- tests/unit/service-worker.test.ts -t "social policies|validated social"` — 1 file passed, 3 tests passed, 12 skipped.
+- `npm run test:unit -- tests/unit/options.test.ts -t "worker migration"` — 1 file passed, 1 test passed, 9 skipped.
+- `npm run test:unit -- tests/unit/options.test.ts tests/unit/service-worker.test.ts tests/unit/site-policy.test.ts` — 3 files passed, 62 tests passed; `npm run typecheck` exited 0.
+- Fresh final `npm run typecheck` — exit 0.
+- Fresh final `npm run test:unit` — 19 files passed, 234 tests passed.
+- Fresh final `npm run build` — exit 0.
+- Fresh final `git diff --check` — exit 0.
+
+### Self-review
+
+- Settings-only messages now require both the current extension ID and the exact `chrome-extension://<id>/dist/options/options.html` document path. Query strings and fragments are ignored through URL parsing, matching a normally navigated tab-hosted Options page.
+- A normal `sender.tab` is allowed. Web content-script URLs, other-extension IDs/origins, and other extension document paths remain rejected before migration or storage access.
+- The delayed worker migration test uses the realistic tab-shaped Options sender and still proves migration writes first and the later user choice wins.
+
+### Concerns
+
+- Delivery-level six-site visual QA remains assigned to Task 4; no live-site pass is claimed here.
