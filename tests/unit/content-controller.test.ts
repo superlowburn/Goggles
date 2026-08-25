@@ -848,7 +848,7 @@ function bootstrapHarness(
 }
 
 describe("content-script bootstrap", () => {
-  it("falls back to Protected when policy messaging rejects without persisting or watching", async () => {
+  it("falls back to Trusted on non-social sites when policy messaging rejects", async () => {
     const harness = bootstrapHarness({
       sendMessage: vi.fn().mockRejectedValue(new Error("storage unavailable")),
     });
@@ -857,13 +857,13 @@ describe("content-script bootstrap", () => {
 
     expect(harness.controller.start).toHaveBeenCalledWith({
       origin: "https://child.example",
-      mode: "protected",
+      mode: "trusted",
     });
     expect(harness.watchPolicy).not.toHaveBeenCalled();
     expect(chrome.storage.local.set).not.toHaveBeenCalled();
   });
 
-  it("falls back to Protected when the policy response is rejected as malformed", async () => {
+  it("falls back to Trusted on a non-social site when the policy response is malformed", async () => {
     const harness = bootstrapHarness({
       sendMessage: vi.fn().mockResolvedValue({ error: "unsupported-page" }),
     });
@@ -872,10 +872,24 @@ describe("content-script bootstrap", () => {
 
     expect(harness.controller.start).toHaveBeenCalledWith({
       origin: "https://child.example",
-      mode: "protected",
+      mode: "trusted",
     });
     expect(harness.watchPolicy).not.toHaveBeenCalled();
     expect(chrome.storage.local.set).not.toHaveBeenCalled();
+  });
+
+  it("falls back to Protected on social sites when policy messaging rejects", async () => {
+    const harness = bootstrapHarness({
+      href: "https://www.reddit.com/r/goggles",
+      sendMessage: vi.fn().mockRejectedValue(new Error("storage unavailable")),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+
+    expect(harness.controller.start).toHaveBeenCalledWith({
+      origin: "https://www.reddit.com",
+      mode: "protected",
+    });
   });
 
   it("starts the returned policy and watches only its exact top origin", async () => {

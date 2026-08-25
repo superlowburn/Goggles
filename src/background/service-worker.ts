@@ -1,10 +1,10 @@
 import type { ExtensionMessage, PolicyContext } from "../shared/media-types";
-import { isSiteMode, SitePolicyStore } from "../shared/site-policy";
+import { isSiteMode, migrateSocialPolicies, normalizeOrigin, SitePolicyStore } from "../shared/site-policy";
 import { BlockedSubjectsStore } from "../shared/blocked-subjects";
 import { ProviderRequestGate } from "./provider-request-gate";
 
 type StorageArea = {
-  get(key: string | string[]): Promise<Record<string, unknown>>;
+  get(key: null | string | string[]): Promise<Record<string, unknown>>;
   set(items: Record<string, unknown>): Promise<void>;
 };
 
@@ -78,14 +78,7 @@ function isExtensionMessage(message: unknown): message is ExtensionMessage {
 }
 
 function originFor(tab?: Tab): string | undefined {
-  if (!tab?.url) return undefined;
-
-  try {
-    const url = new URL(tab.url);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : undefined;
-  } catch {
-    return undefined;
-  }
+  return tab?.url ? normalizeOrigin(tab.url) ?? undefined : undefined;
 }
 
 async function contextFor(
@@ -169,8 +162,9 @@ export async function installProviderGateLifecycle(
   await gate.sweep();
 }
 
-export function installFirstRun(runtime: FirstRunRuntime): void {
+export function installFirstRun(runtime: FirstRunRuntime, storage?: StorageArea): void {
   runtime.onInstalled.addListener(({ reason }) => {
+    if (storage) void migrateSocialPolicies(storage);
     if (reason === "install") void runtime.openOptionsPage();
   });
 }
@@ -196,4 +190,5 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-if (chrome.runtime.onInstalled) installFirstRun(chrome.runtime);
+void migrateSocialPolicies(chrome.storage.local);
+if (chrome.runtime.onInstalled) installFirstRun(chrome.runtime, chrome.storage.local);

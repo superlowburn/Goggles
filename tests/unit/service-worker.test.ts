@@ -5,6 +5,7 @@ import {
   installProviderGateLifecycle,
 } from "../../src/background/service-worker";
 import { defaultTrumpKeywords } from "../../src/shared/blocked-subjects";
+import { policyKey, socialPolicyKey } from "../../src/shared/site-policy";
 
 describe("handleExtensionMessage", () => {
   it("returns the sender tab policy for the current page", async () => {
@@ -21,7 +22,7 @@ describe("handleExtensionMessage", () => {
       ),
     ).toEqual({
       origin: "https://news.example",
-      mode: "protected",
+      mode: "trusted",
       blockedSubjects: { enabled: false, keywords: defaultTrumpKeywords },
     });
   });
@@ -43,7 +44,7 @@ describe("handleExtensionMessage", () => {
       deps,
     )).resolves.toEqual({
       origin: "https://news.example",
-      mode: "protected",
+      mode: "trusted",
       blockedSubjects: { enabled: true, keywords: ["Donald Trump"] },
     });
   });
@@ -70,6 +71,25 @@ describe("handleExtensionMessage", () => {
     expect(deps.storage.set).toHaveBeenCalledWith({
       "site-policy:https://news.example": "protected",
     });
+  });
+
+  it("sets a social tab through its platform policy", async () => {
+    const deps = {
+      storage: { get: vi.fn().mockResolvedValue({}), set: vi.fn().mockResolvedValue(undefined) },
+      tabs: { get: vi.fn().mockResolvedValue({ id: 7, url: "https://old.reddit.com/r/goggles" }) },
+    };
+
+    await expect(handleExtensionMessage(
+      {
+        type: "policy:set-tab",
+        tabId: 7,
+        mode: "trusted",
+        expectedOrigin: "https://old.reddit.com",
+      },
+      {},
+      deps,
+    )).resolves.toEqual({ origin: "https://old.reddit.com", mode: "trusted" });
+    expect(deps.storage.set).toHaveBeenCalledWith({ [socialPolicyKey("reddit")]: "trusted" });
   });
 
   it("rejects a set-tab request when the tab redirected away from the displayed origin", async () => {
@@ -196,5 +216,23 @@ describe("installFirstRun", () => {
     await Promise.resolve();
 
     expect(openOptionsPage).toHaveBeenCalledTimes(1);
+  });
+
+  it("migrates trusted legacy social policies on updates", async () => {
+    let onInstalled!: (details: { reason: string }) => void;
+    const storage = {
+      get: vi.fn().mockResolvedValue({ [policyKey("https://old.reddit.com")]: "trusted" }),
+      set: vi.fn().mockResolvedValue(undefined),
+    };
+    installFirstRun({
+      onInstalled: { addListener: vi.fn((listener) => { onInstalled = listener; }) },
+      openOptionsPage: vi.fn().mockResolvedValue(undefined),
+    }, storage);
+
+    onInstalled({ reason: "update" });
+
+    await vi.waitFor(() => {
+      expect(storage.set).toHaveBeenCalledWith({ [socialPolicyKey("reddit")]: "trusted" });
+    });
   });
 });

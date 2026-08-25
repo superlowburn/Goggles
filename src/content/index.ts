@@ -1,4 +1,4 @@
-import { isSiteMode, SitePolicyStore } from "../shared/site-policy";
+import { defaultPolicyForOrigin, isSiteMode, SitePolicyStore } from "../shared/site-policy";
 import type { ExtensionMessage, PolicyContext, SiteMode } from "../shared/media-types";
 import { ContentController } from "./content-controller";
 import {
@@ -95,9 +95,10 @@ export async function bootstrapContentScript(
     started = true;
   } catch {
     if (disposed) return;
+    const origin = fallbackOrigin(page, dependencies);
     controller.start({
-      origin: fallbackOrigin(page, dependencies),
-      mode: "protected",
+      origin,
+      mode: defaultPolicyForOrigin(origin),
     });
   }
 }
