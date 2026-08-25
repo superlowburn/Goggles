@@ -15,9 +15,16 @@ type StorageChangeEvent = {
   removeListener(listener: StorageChangeListener): void;
 };
 
-export interface BlockedSubjectsConfig {
+export interface BlockedSubject {
+  name: string;
   enabled: boolean;
   keywords: string[];
+}
+
+export interface BlockedSubjectsConfig {
+  subjects?: BlockedSubject[];
+  enabled?: boolean;
+  keywords?: string[];
 }
 
 export const blockedSubjectsKey = "blocked-subjects";
@@ -33,16 +40,40 @@ export const defaultTrumpKeywords = [
 
 export function parseBlockedSubjects(value: unknown): BlockedSubjectsConfig {
   if (!value || typeof value !== "object") {
-    return { enabled: false, keywords: [...defaultTrumpKeywords] };
+    return { subjects: defaultSubjects() };
   }
-  const candidate = value as { enabled?: unknown; keywords?: unknown };
+  const candidate = value as { subjects?: unknown; enabled?: unknown; keywords?: unknown };
+  if (Array.isArray(candidate.subjects)) {
+    const subjects = candidate.subjects.flatMap((subject) => {
+      if (!subject || typeof subject !== "object") return [];
+      const item = subject as { name?: unknown; enabled?: unknown; keywords?: unknown };
+      const name = typeof item.name === "string" ? normalizeName(item.name) : "";
+      const keywords = Array.isArray(item.keywords)
+        ? uniqueKeywords(item.keywords.filter((keyword): keyword is string => typeof keyword === "string"))
+        : [];
+      return name && keywords.length > 0
+        ? [{ name, enabled: item.enabled === true, keywords }]
+        : [];
+    });
+    return { subjects };
+  }
   const keywords = Array.isArray(candidate.keywords)
     ? uniqueKeywords(candidate.keywords.filter((item): item is string => typeof item === "string"))
     : [];
   return {
-    enabled: candidate.enabled === true,
-    keywords: keywords.length > 0 ? keywords : [...defaultTrumpKeywords],
+    subjects: [{
+      name: "Donald Trump",
+      enabled: candidate.enabled === true,
+      keywords: keywords.length > 0 ? keywords : [...defaultTrumpKeywords],
+    }],
   };
+}
+
+export function suggestSubjectKeywords(name: string): string[] {
+  const normalized = normalizeName(name);
+  if (!normalized) return [];
+  const parts = normalized.split(" ");
+  return uniqueKeywords([normalized, ...(parts.length > 1 ? [parts.at(-1)!] : [])]);
 }
 
 export function matchesBlockedSubject(
@@ -56,13 +87,18 @@ export function candidateMatchesBlockedSubject(
   candidate: MediaCandidate,
   config: BlockedSubjectsConfig,
 ): boolean {
-  return config.enabled &&
+  const keywords = enabledSubjectKeywords(config);
+  return keywords.length > 0 &&
     isSubjectCandidate(candidate) &&
-    (matchesBlockedSubject(candidate.element, config.keywords) ||
+    (matchesBlockedSubject(candidate.element, keywords) ||
       (candidate.kind === "background-image" && textMatchesBlockedSubject(
         candidate.element.ownerDocument.defaultView?.getComputedStyle(candidate.element).backgroundImage ?? "",
-        config.keywords,
+        keywords,
       )));
+}
+
+export function hasEnabledBlockedSubjects(config: BlockedSubjectsConfig): boolean {
+  return enabledSubjectKeywords(config).length > 0;
 }
 
 export class BlockedSubjectsStore {
@@ -99,6 +135,23 @@ export function uniqueKeywords(keywords: readonly string[]): string[] {
     seen.add(key);
     return [normalized];
   });
+}
+
+function normalizeName(name: string): string {
+  return name.replace(/\s+/gu, " ").trim();
+}
+
+function defaultSubjects(): BlockedSubject[] {
+  return [{ name: "Donald Trump", enabled: false, keywords: [...defaultTrumpKeywords] }];
+}
+
+function enabledSubjectKeywords(config: BlockedSubjectsConfig): string[] {
+  if (config.subjects) {
+    return config.subjects
+      .filter((subject) => subject.enabled)
+      .flatMap((subject) => subject.keywords);
+  }
+  return config.enabled ? config.keywords ?? [] : [];
 }
 
 function subjectContext(element: HTMLElement): string {

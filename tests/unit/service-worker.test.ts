@@ -117,7 +117,9 @@ describe("handleExtensionMessage", () => {
     ).toEqual({
       origin: "https://news.example",
       mode: "trusted",
-      blockedSubjects: { enabled: false, keywords: defaultTrumpKeywords },
+      blockedSubjects: {
+        subjects: [{ name: "Donald Trump", enabled: false, keywords: defaultTrumpKeywords }],
+      },
     });
   });
 
@@ -139,7 +141,9 @@ describe("handleExtensionMessage", () => {
     )).resolves.toEqual({
       origin: "https://news.example",
       mode: "trusted",
-      blockedSubjects: { enabled: true, keywords: ["Donald Trump"] },
+      blockedSubjects: {
+        subjects: [{ name: "Donald Trump", enabled: true, keywords: ["Donald Trump"] }],
+      },
     });
   });
 

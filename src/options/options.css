@@ -207,6 +207,34 @@ h2 {
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.28);
 }
+.subject-explainer.standalone { padding: 0; }
+.add-subject-form { display: grid; gap: 10px; margin-top: 24px; }
+.add-subject-form > label { font-weight: 700; }
+.add-subject-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; }
+.add-subject-row input {
+  min-height: 44px;
+  padding: 0 12px;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfaf5;
+  font: inherit;
+}
+.add-subject-form button,
+.remove-subject {
+  min-height: 40px;
+  padding: 0 12px;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+#subject-suggestions { display: grid; gap: 8px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; }
+#subject-suggestions[hidden] { display: none; }
+#subject-suggestions label { display: flex; gap: 8px; align-items: center; }
+#subject-suggestions button { justify-self: start; }
+.remove-subject { margin: 0 22px 18px; }
 .subject-toggle {
   display: flex;
   gap: 24px;
@@ -309,6 +337,7 @@ button:focus-visible {
   .demo-media,
   .demo-media img { min-height: 220px; height: 220px; }
   section { grid-template-columns: 1fr; gap: 4px; padding: 44px 0; }
+  .add-subject-row { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {

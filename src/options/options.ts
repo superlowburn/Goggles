@@ -1,6 +1,7 @@
 import {
   BlockedSubjectsStore,
   parseBlockedSubjects,
+  suggestSubjectKeywords,
   uniqueKeywords,
 } from "../shared/blocked-subjects";
 import {
@@ -46,25 +47,113 @@ export async function mountOptions(
   const values = await chromeApi.storage.local.get(null);
   const blockedStore = new BlockedSubjectsStore(chromeApi.storage.local);
 
-  const blocked = parseBlockedSubjects(values["blocked-subjects"]);
-  const blockedEnabled = root.querySelector<HTMLInputElement>("#blocked-subjects-enabled");
-  const blockedKeywords = root.querySelector<HTMLTextAreaElement>("#blocked-subject-keywords");
+  let blocked = parseBlockedSubjects(values["blocked-subjects"]);
   const blockedStatus = root.querySelector<HTMLElement>("#blocked-subjects-status");
-  if (blockedEnabled) blockedEnabled.checked = blocked.enabled;
-  if (blockedKeywords) blockedKeywords.value = blocked.keywords.join("\n");
+  const subjectList = root.querySelector<HTMLElement>("#subject-list");
   const saveBlockedSubjects = (): void => {
-    const config = parseBlockedSubjects({
-      enabled: blockedEnabled?.checked ?? false,
-      keywords: uniqueKeywords(blockedKeywords?.value.split("\n") ?? []),
-    });
-    if (blockedKeywords) blockedKeywords.value = config.keywords.join("\n");
-    void blockedStore.set(config).then(() => {
-      values["blocked-subjects"] = config;
+    void blockedStore.set(blocked).then(() => {
+      values["blocked-subjects"] = blocked;
       if (blockedStatus) blockedStatus.textContent = "Saved locally";
     });
   };
-  blockedEnabled?.addEventListener("change", saveBlockedSubjects);
-  blockedKeywords?.addEventListener("change", saveBlockedSubjects);
+  const renderSubjects = (): void => {
+    if (!subjectList) return;
+    subjectList.replaceChildren(...(blocked.subjects ?? []).map((subject, index) => {
+      const card = document.createElement("div");
+      card.className = "subject-card";
+
+      const toggle = document.createElement("label");
+      toggle.className = "subject-toggle";
+      const toggleId = index === 0 ? "blocked-subjects-enabled" : `blocked-subject-${index}-enabled`;
+      toggle.htmlFor = toggleId;
+      const copy = document.createElement("span");
+      const title = document.createElement("strong");
+      title.textContent = subject.name;
+      const hint = document.createElement("small");
+      hint.textContent = "Frost likely matches";
+      copy.append(title, hint);
+      const enabled = document.createElement("input");
+      enabled.id = toggleId;
+      enabled.type = "checkbox";
+      enabled.checked = subject.enabled;
+      enabled.addEventListener("change", () => {
+        subject.enabled = enabled.checked;
+        saveBlockedSubjects();
+      });
+      toggle.append(copy, enabled);
+
+      const details = document.createElement("details");
+      details.className = "keyword-editor";
+      const summary = document.createElement("summary");
+      summary.textContent = "Matching words";
+      const keywordLabel = document.createElement("label");
+      const keywordId = index === 0 ? "blocked-subject-keywords" : `blocked-subject-${index}-keywords`;
+      keywordLabel.htmlFor = keywordId;
+      const keywordHint = document.createElement("span");
+      keywordHint.textContent = "One phrase per line.";
+      const keywords = document.createElement("textarea");
+      keywords.id = keywordId;
+      keywords.rows = 7;
+      keywords.spellcheck = false;
+      keywords.value = subject.keywords.join("\n");
+      keywords.addEventListener("change", () => {
+        subject.keywords = uniqueKeywords(keywords.value.split("\n"));
+        keywords.value = subject.keywords.join("\n");
+        saveBlockedSubjects();
+      });
+      keywordLabel.append(keywordHint, keywords);
+      details.append(summary, keywordLabel);
+
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "remove-subject";
+      remove.textContent = "Remove subject";
+      remove.addEventListener("click", () => {
+        blocked.subjects?.splice(index, 1);
+        blocked = parseBlockedSubjects(blocked);
+        renderSubjects();
+        saveBlockedSubjects();
+      });
+      card.append(toggle, details, remove);
+      return card;
+    }));
+  };
+  renderSubjects();
+
+  const newSubjectName = root.querySelector<HTMLInputElement>("#new-subject-name");
+  const suggestions = root.querySelector<HTMLElement>("#subject-suggestions");
+  root.querySelector<HTMLButtonElement>("#suggest-subject")?.addEventListener("click", () => {
+    const keywords = suggestSubjectKeywords(newSubjectName?.value ?? "");
+    if (!suggestions || keywords.length === 0) return;
+    const heading = document.createElement("strong");
+    heading.textContent = "Suggested matching words";
+    const choices = keywords.map((keyword, index) => {
+      const label = document.createElement("label");
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = index === 0;
+      input.value = keyword;
+      label.append(input, document.createTextNode(keyword));
+      return label;
+    });
+    const add = document.createElement("button");
+    add.id = "add-subject";
+    add.type = "button";
+    add.textContent = "Add subject";
+    add.addEventListener("click", () => {
+      const selected = Array.from(suggestions.querySelectorAll<HTMLInputElement>("input:checked"))
+        .map((input) => input.value);
+      if (selected.length === 0) return;
+      blocked.subjects?.push({ name: keywords[0]!, enabled: true, keywords: selected });
+      renderSubjects();
+      saveBlockedSubjects();
+      suggestions.hidden = true;
+      suggestions.replaceChildren();
+      if (newSubjectName) newSubjectName.value = "";
+    });
+    suggestions.replaceChildren(heading, ...choices, add);
+    suggestions.hidden = false;
+  });
 
   const platforms = root.querySelector<HTMLElement>("#social-platforms");
   const platformStatus = root.querySelector<HTMLElement>("#social-platforms-status");

@@ -5,6 +5,7 @@ import { ContentController } from "./content-controller";
 import {
   BlockedSubjectsStore,
   type BlockedSubjectsConfig,
+  hasEnabledBlockedSubjects,
 } from "../shared/blocked-subjects";
 
 interface ContentControllerPort {
@@ -91,7 +92,9 @@ export async function bootstrapContentScript(
       ...response,
       mode: currentMode,
       descriptionsVisible,
-      ...(currentBlockedSubjects.enabled ? { blockedSubjects: currentBlockedSubjects } : {}),
+      ...(currentBlockedSubjects && hasEnabledBlockedSubjects(currentBlockedSubjects)
+        ? { blockedSubjects: currentBlockedSubjects }
+        : {}),
     });
     started = true;
   } catch {

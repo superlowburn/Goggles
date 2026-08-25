@@ -76,3 +76,12 @@ The pass-site screenshots were inspected: default news pages were visible, and f
 
 - Washington Post remains unverified beyond the captured HTTP/2 navigation blocker.
 - WSJ remains unverified beyond its captured temporary access restriction.
+
+## Final subject-work integration and bounded browser retry
+
+- Layered the existing multi-subject/name-suggestion changes from the primary worktree onto the release branch without changing the primary worktree.
+- Removed the obsolete static-only Settings screenshot test; the loaded-extension Settings visual test already exercises the dynamically generated matching-word editor.
+- Fresh integrated verification: typecheck and build passed; 20 unit files / 240 tests passed; 38 deterministic loaded-extension E2E passed and 6 opt-in live tests skipped.
+- Rebuilt `goggles-0.2.0.zip`; `unzip -t` passed, `manifest.json` remains at archive root, and removed provider assets remain absent. Final SHA-256: `0c1d3eee0e135bfdc5b291000daab5de254fdaf2e56b826281e5bc98ea37b60e`.
+- One alternate-method retry used the user's Chrome: Washington Post loaded normally, proving the prior HTTP/2 error was isolated-headless specific. WSJ reached a human-verification slider and remains blocked; it was not solved or bypassed.
+- Camofox was not installed or exposed on this machine, so no Camofox result is claimed.

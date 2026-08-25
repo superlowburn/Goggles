@@ -12,10 +12,11 @@ Before returning any user-visible code change:
 
 ## Browser testing safety — hard rule
 
-- Automated browser QA must be truly headless and must never open, activate, or focus a visible browser window.
+- Automated browser QA should be truly headless whenever the extension can load that way.
 - Never focus, type in, or otherwise interact with the user's browser address bar.
-- Offscreen coordinates and small headed windows are not acceptable substitutes for headless execution because macOS may still surface or focus them.
-- If a required extension test cannot run headlessly, do not run it without the user's explicit permission. Report the unverified check instead.
+- Do not use Playwright's ordinary headed launch for extension QA; it can activate Chrome and steal the user's focus.
+- When Chrome will not load the extension headlessly, the approved fallback is an isolated Chrome process started directly with a temporary user-data directory, a remote-debugging port, `--no-startup-window`, and the unpacked extension flags. Attach Playwright over CDP, then create each 480×320 test window through `Target.createTarget` with `newWindow: true` and `background: true`. Do not use `open`, AppleScript, or Playwright's ordinary `newPage()` to create the first window.
+- Record the foreground application before and after with the read-only `lsappinfo` command. Continue only when it is unchanged; otherwise close the QA browser, restore the prior application, and report the check as blocked.
 
 ## Push packaging — hard rule
 

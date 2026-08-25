@@ -245,8 +245,11 @@ describe("mountOptions", () => {
     await Promise.resolve();
 
     expect(api.state["blocked-subjects"]).toEqual({
-      enabled: true,
-      keywords: ["Trump", "President Trump"],
+      subjects: [{
+        name: "Donald Trump",
+        enabled: true,
+        keywords: ["Trump", "President Trump"],
+      }],
     });
     await vi.waitFor(() => {
       expect(document.querySelector("#blocked-subjects-status")?.textContent).toBe("Saved locally");
@@ -266,5 +269,34 @@ describe("mountOptions", () => {
 
     summary?.click();
     expect(disclosure?.open).toBe(true);
+  });
+
+  it("previews local name suggestions before adding another subject", async () => {
+    const api = chromeApi({});
+    await mountOptions(document.querySelector("#app")!, api);
+
+    const name = document.querySelector<HTMLInputElement>("#new-subject-name")!;
+    expect(name.placeholder).toBe("FirstName LastName works best");
+    name.value = "Elon Musk";
+    document.querySelector<HTMLButtonElement>("#suggest-subject")!.click();
+
+    expect(document.querySelector("#subject-suggestions")?.textContent).toContain("Elon Musk");
+    expect(document.querySelector("#subject-suggestions")?.textContent).toContain("Musk");
+    expect(api.state["blocked-subjects"]).toBeUndefined();
+
+    const choices = document.querySelectorAll<HTMLInputElement>("#subject-suggestions input");
+    expect(Array.from(choices, (choice) => choice.checked)).toEqual([true, false]);
+    choices[1]!.checked = true;
+
+    document.querySelector<HTMLButtonElement>("#add-subject")!.click();
+    await vi.waitFor(() => {
+      expect(api.state["blocked-subjects"]).toEqual({
+        subjects: [
+          { name: "Donald Trump", enabled: false, keywords: expect.any(Array) },
+          { name: "Elon Musk", enabled: true, keywords: ["Elon Musk", "Musk"] },
+        ],
+      });
+    });
+    expect(document.querySelector("#subject-list")?.textContent).toContain("Elon Musk");
   });
 });

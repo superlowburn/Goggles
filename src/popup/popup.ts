@@ -1,6 +1,9 @@
 import type { ExtensionMessage, PolicyContext, SiteMode } from "../shared/media-types";
 import { isSiteMode } from "../shared/site-policy";
-import type { BlockedSubjectsConfig } from "../shared/blocked-subjects";
+import {
+  hasEnabledBlockedSubjects,
+  type BlockedSubjectsConfig,
+} from "../shared/blocked-subjects";
 
 type PopupTab = { id?: number | undefined; url?: string | undefined };
 
@@ -33,11 +36,9 @@ function isBlockedSubjectsConfig(value: unknown): value is BlockedSubjectsConfig
   return (
     typeof value === "object" &&
     value !== null &&
-    "enabled" in value &&
-    typeof value.enabled === "boolean" &&
-    "keywords" in value &&
-    Array.isArray(value.keywords) &&
-    value.keywords.every((keyword) => typeof keyword === "string")
+    (("subjects" in value && Array.isArray(value.subjects)) ||
+      ("enabled" in value && typeof value.enabled === "boolean" &&
+        "keywords" in value && Array.isArray(value.keywords)))
   );
 }
 
@@ -107,8 +108,9 @@ export async function mountPopup(root: HTMLElement, chromeApi: PopupChromeApi): 
     error.hidden = false;
     return;
   }
-  subjectsState.textContent = initialResponse.blockedSubjects.enabled ? "On" : "Off";
-  subjectsDescription.textContent = initialResponse.blockedSubjects.enabled
+  const subjectsEnabled = hasEnabledBlockedSubjects(initialResponse.blockedSubjects);
+  subjectsState.textContent = subjectsEnabled ? "On" : "Off";
+  subjectsDescription.textContent = subjectsEnabled
     ? "Stay frosted on every site."
     : "Turn on matching in Settings.";
 
