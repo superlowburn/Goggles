@@ -135,7 +135,11 @@ describe("mountOptions", () => {
     const runtime = {
       sendMessage: vi.fn((message: unknown) => handleExtensionMessage(
         message,
-        { id: "extension-id" },
+        {
+          id: "extension-id",
+          url: "chrome-extension://extension-id/dist/options/options.html",
+          tab: { id: 7, url: "chrome-extension://extension-id/dist/options/options.html" },
+        },
         {
           storage,
           tabs: { get: vi.fn() },

@@ -19,7 +19,11 @@ describe("handleExtensionMessage", () => {
 
     await expect(handleExtensionMessage(
       { type: "policy:get-social" },
-      { id: "extension-id" },
+      {
+        id: "extension-id",
+        url: "chrome-extension://extension-id/dist/options/options.html?source=menu#social",
+        tab: { id: 7, url: "chrome-extension://extension-id/dist/options/options.html?source=menu#social" },
+      },
       deps,
     )).resolves.toEqual({
       socialPolicies: {
@@ -44,7 +48,11 @@ describe("handleExtensionMessage", () => {
 
     await expect(handleExtensionMessage(
       { type: "policy:set-social", platform: "reddit", mode: "trusted" },
-      { id: "extension-id" },
+      {
+        id: "extension-id",
+        url: "chrome-extension://extension-id/dist/options/options.html",
+        tab: { id: 7, url: "chrome-extension://extension-id/dist/options/options.html" },
+      },
       deps,
     )).resolves.toEqual({ platform: "reddit", mode: "trusted" });
     expect(deps.storage.set).toHaveBeenCalledWith({ [socialPolicyKey("reddit")]: "trusted" });
@@ -57,10 +65,35 @@ describe("handleExtensionMessage", () => {
         mode: "trusted",
       }, {
         id: "extension-id",
+        url: "https://reddit.com",
         tab: { id: 7, url: "https://reddit.com" },
       }],
-      [{ type: "policy:set-social", platform: "reddit.example", mode: "trusted" }, { id: "extension-id" }],
-      [{ type: "policy:set-social", platform: "reddit", mode: "strict" }, { id: "extension-id" }],
+      [{
+        type: "policy:set-social",
+        platform: "reddit",
+        mode: "trusted",
+      }, {
+        id: "extension-id",
+        url: "chrome-extension://extension-id/dist/popup/popup.html",
+        tab: { id: 7, url: "chrome-extension://extension-id/dist/popup/popup.html" },
+      }],
+      [{
+        type: "policy:set-social",
+        platform: "reddit",
+        mode: "trusted",
+      }, {
+        id: "extension-id",
+        url: "chrome-extension://other-extension/dist/options/options.html",
+        tab: { id: 7, url: "chrome-extension://other-extension/dist/options/options.html" },
+      }],
+      [{ type: "policy:set-social", platform: "reddit.example", mode: "trusted" }, {
+        id: "extension-id",
+        url: "chrome-extension://extension-id/dist/options/options.html",
+      }],
+      [{ type: "policy:set-social", platform: "reddit", mode: "strict" }, {
+        id: "extension-id",
+        url: "chrome-extension://extension-id/dist/options/options.html",
+      }],
     ] as const) {
       await expect(handleExtensionMessage(message, sender, deps)).resolves.toEqual({
         error: "invalid-message",

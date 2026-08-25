@@ -17,7 +17,7 @@ type StorageArea = {
 
 type Tab = { id?: number | undefined; url?: string | undefined };
 
-type MessageSender = { tab?: Tab; id?: string };
+type MessageSender = { tab?: Tab; id?: string; url?: string };
 
 type WorkerDependencies = {
   storage: StorageArea;
@@ -41,6 +41,18 @@ type WorkerResponse = PolicyContext | { opened: true } | {
 
 function isSocialPlatformId(value: unknown): value is SocialPlatformId {
   return typeof value === "string" && socialPlatforms.some(({ id }) => id === value);
+}
+
+function isOptionsSender(sender: MessageSender, extensionId: string): boolean {
+  if (sender.id !== extensionId || !sender.url) return false;
+  try {
+    const url = new URL(sender.url);
+    return url.protocol === "chrome-extension:" &&
+      url.hostname === extensionId &&
+      url.pathname === "/dist/options/options.html";
+  } catch {
+    return false;
+  }
 }
 
 function isExtensionMessage(message: unknown): message is ExtensionMessage {
@@ -102,7 +114,7 @@ export async function handleExtensionMessage(
   if (!isExtensionMessage(message)) return { error: "invalid-message" };
   if (
     (message.type === "policy:get-social" || message.type === "policy:set-social") &&
-    (sender.id !== (deps.extensionId ?? chrome.runtime.id) || sender.tab !== undefined)
+    !isOptionsSender(sender, deps.extensionId ?? chrome.runtime.id)
   ) {
     return { error: "invalid-message" };
   }
