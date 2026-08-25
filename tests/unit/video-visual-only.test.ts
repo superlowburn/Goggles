@@ -45,6 +45,7 @@ describe("video protection", () => {
           update: vi.fn(),
           setBlockedSubject: vi.fn(),
           setDescriptionVisible: vi.fn(),
+          setPolicy: vi.fn(),
           isRevealed: () => false,
         } as ProtectionHandle;
         return handle;

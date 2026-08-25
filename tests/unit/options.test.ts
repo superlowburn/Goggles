@@ -90,6 +90,39 @@ describe("mountOptions", () => {
     expect(api.state[socialPolicyKey("reddit")]).toBe("trusted");
   });
 
+  it("waits for legacy social migration before rendering or writing platform switches", async () => {
+    const legacyKey = policyKey("https://old.reddit.com");
+    const platformKey = socialPolicyKey("reddit");
+    const state: Record<string, unknown> = { [legacyKey]: "trusted" };
+    let resolveMigration!: (values: Record<string, unknown>) => void;
+    let nullReads = 0;
+    const storage = {
+      get: vi.fn((keys: null | string | string[]) => {
+        if (keys === null && nullReads++ === 0) {
+          return new Promise<Record<string, unknown>>((resolve) => { resolveMigration = resolve; });
+        }
+        if (keys === null) return Promise.resolve({ ...state });
+        const requested = Array.isArray(keys) ? keys : [keys];
+        return Promise.resolve(Object.fromEntries(requested.map((key) => [key, state[key]])));
+      }),
+      set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(state, items); }),
+      remove: vi.fn(async (key: string) => { delete state[key]; }),
+    };
+    const mounting = mountOptions(document.querySelector("#app")!, { storage: { local: storage } });
+    expect(document.querySelectorAll("[data-social-platform]")).toHaveLength(0);
+
+    resolveMigration({ ...state });
+    await mounting;
+    const reddit = document.querySelector<HTMLInputElement>('[data-social-platform="reddit"]')!;
+    expect(reddit.checked).toBe(false);
+    expect(storage.set).toHaveBeenNthCalledWith(1, { [platformKey]: "trusted" });
+
+    reddit.checked = true;
+    reddit.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(state[platformKey]).toBe("protected"));
+    expect(storage.set).toHaveBeenNthCalledWith(2, { [platformKey]: "protected" });
+  });
+
   it("lists protected non-social exact origins in deterministic alphabetical order", async () => {
     const api = chromeApi({
       [policyKey("https://zeta.example:8443")]: "protected",

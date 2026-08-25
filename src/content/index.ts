@@ -97,10 +97,17 @@ export async function bootstrapContentScript(
   } catch {
     if (disposed) return;
     const origin = fallbackOrigin(page, dependencies);
+    let mode = defaultPolicyForOrigin(origin);
+    let started = false;
+    stopWatching = dependencies.watchPolicy(origin, (nextMode) => {
+      mode = nextMode;
+      if (started) controller.applyMode(nextMode);
+    });
     controller.start({
       origin,
-      mode: defaultPolicyForOrigin(origin),
+      mode,
     });
+    started = true;
   }
 }
 

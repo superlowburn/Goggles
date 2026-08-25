@@ -5,6 +5,7 @@ import {
   isSiteControlEligible,
   type ProtectionHandle,
   type ProtectionOptions,
+  type SiteControl,
 } from "../protection/renderer";
 import type {
   MediaCandidate,
@@ -204,13 +205,14 @@ export class ContentController {
     if (isVisualCandidate(candidate) && this.hasOverlappingVideoRecord(candidate)) return;
     if (isVideoCandidate(candidate)) this.removeOverlappingVisualRecords(candidate);
 
+    const siteControl = this.siteControl(blockedSubject);
     const handle = this.renderer.protect(candidate, {
       description: this.describe(candidate),
       blockedSubject,
       mode: this.mode,
       onToggleDescriptions: () => this.toggleDescriptions(),
       descriptionsVisible: this.descriptionsVisible,
-      ...this.siteControl(blockedSubject),
+      ...(siteControl ? { siteControl } : {}),
     });
     const record: ProtectionRecord = {
       candidate,
@@ -229,22 +231,18 @@ export class ContentController {
     return this.enableSiteControl && Boolean(this.origin) && !socialPlatformForOrigin(this.origin!);
   }
 
-  private siteControl(blockedSubject: boolean): Pick<ProtectionOptions, "siteControl"> | {} {
-    if (!this.enableSiteControl || !this.origin) return {};
+  private siteControl(blockedSubject: boolean): SiteControl | undefined {
+    if (!this.enableSiteControl || !this.origin) return undefined;
     if (this.mode === "trusted") {
-      if (blockedSubject || socialPlatformForOrigin(this.origin)) return {};
+      if (blockedSubject || socialPlatformForOrigin(this.origin)) return undefined;
       return {
-        siteControl: {
-          mode: "protected" as const,
-          save: () => Promise.resolve(this.setSiteMode(this.origin!, "protected")),
-        },
+        mode: "protected",
+        save: () => Promise.resolve(this.setSiteMode(this.origin!, "protected")),
       };
     }
     return {
-      siteControl: {
-        mode: "trusted" as const,
-        save: () => Promise.resolve(this.setSiteMode(this.origin!, "trusted")),
-      },
+      mode: "trusted",
+      save: () => Promise.resolve(this.setSiteMode(this.origin!, "trusted")),
     };
   }
 
@@ -307,6 +305,7 @@ export class ContentController {
         this.detachRecord(record);
       } else {
         record.handle.setBlockedSubject(blockedSubject);
+        record.handle.setPolicy(this.mode, this.siteControl(blockedSubject));
       }
     }
     this.observer.scan(this.document);

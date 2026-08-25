@@ -5,6 +5,7 @@ import {
 } from "../shared/blocked-subjects";
 import {
   normalizeOrigin,
+  prepareSocialPolicies,
   socialPlatformForOrigin,
   socialPlatforms,
   socialPolicyKey,
@@ -37,6 +38,7 @@ export async function mountOptions(
   root: HTMLElement,
   chromeApi: OptionsChromeApi,
 ): Promise<void> {
+  await prepareSocialPolicies(chromeApi.storage.local);
   const values = await chromeApi.storage.local.get(null);
   const blockedStore = new BlockedSubjectsStore(chromeApi.storage.local);
 

@@ -13,6 +13,7 @@ import type {
   ProtectionHandle,
   ProtectionOptions,
 } from "../../src/protection/renderer";
+import { ProtectionRenderer } from "../../src/protection/renderer";
 import { classifyElement } from "../../src/media/classifier";
 
 class FakeDocumentObserver implements DocumentObserverPort {
@@ -61,6 +62,11 @@ function rendererHarness() {
       }),
       update: vi.fn(),
       setDescriptionVisible: vi.fn(),
+      setPolicy: vi.fn((mode: SiteMode, siteControl?: ProtectionOptions["siteControl"]) => {
+        options.mode = mode;
+        if (siteControl) options.siteControl = siteControl;
+        else delete options.siteControl;
+      }),
       isRevealed: () => revealed,
       setBlockedSubject: vi.fn((blocked: boolean) => {
         options.blockedSubject = blocked;
@@ -229,6 +235,45 @@ describe("ContentController", () => {
     expect(harness.renderer.activeFor(ordinary)[0]?.options.siteControl?.mode).toBe("protected");
     expect(harness.renderer.activeFor(futureSubject)[0]?.options.blockedSubject).toBe(true);
     expect(harness.renderer.activeFor(futureSubject)[0]?.handle.isRevealed()).toBe(false);
+  });
+
+  it("refreshes a retained revealed subject so refrost and rereveal do not offer stale Always show", async () => {
+    const image = document.createElement("img");
+    image.alt = "Donald Trump at an event";
+    vi.spyOn(image, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 320, 200));
+    document.body.append(image);
+    const observer = new FakeDocumentObserver();
+    const renderer = new ProtectionRenderer({ trustedActivation: () => true });
+    const setSiteMode = vi.fn().mockResolvedValue(undefined);
+    const controller = new ContentController({
+      document,
+      observer,
+      renderer,
+      classify: (element) => element === image ? candidate(image, "image") : null,
+      resolveDescription: () => "Donald Trump at an event",
+      enableSiteControl: true,
+      setSiteMode,
+    });
+    controller.start({
+      origin: "https://news.example",
+      mode: "protected",
+      blockedSubjects: { enabled: true, keywords: ["Trump"] },
+    });
+    observer.emit([image]);
+    const layer = renderer.debugLayerFor(image)!;
+    layer.querySelector<HTMLButtonElement>(".eg-reveal-surface")!.click();
+    const alwaysShow = layer.querySelector<HTMLButtonElement>(".eg-site-action")!;
+
+    alwaysShow.click();
+    await vi.waitFor(() => expect(setSiteMode).toHaveBeenCalledWith("https://news.example", "trusted"));
+    controller.applyMode("trusted");
+    expect(layer.querySelector(".eg-reprotect")).not.toBeNull();
+
+    layer.querySelector<HTMLButtonElement>(".eg-reprotect")!.click();
+    layer.querySelector<HTMLButtonElement>(".eg-reveal-surface")!.click();
+
+    expect(layer.querySelector(".eg-reprotect")).not.toBeNull();
+    expect(layer.querySelector(".eg-site-action")).toBeNull();
   });
 
   it("observes Trusted mode without protecting unrelated dynamic media", () => {
@@ -788,7 +833,7 @@ describe("content-script bootstrap", () => {
       origin: "https://child.example",
       mode: "trusted",
     });
-    expect(harness.watchPolicy).not.toHaveBeenCalled();
+    expect(harness.watchPolicy).toHaveBeenCalledWith("https://child.example", expect.any(Function));
     expect(chrome.storage.local.set).not.toHaveBeenCalled();
   });
 
@@ -803,7 +848,7 @@ describe("content-script bootstrap", () => {
       origin: "https://child.example",
       mode: "trusted",
     });
-    expect(harness.watchPolicy).not.toHaveBeenCalled();
+    expect(harness.watchPolicy).toHaveBeenCalledWith("https://child.example", expect.any(Function));
     expect(chrome.storage.local.set).not.toHaveBeenCalled();
   });
 
@@ -819,6 +864,48 @@ describe("content-script bootstrap", () => {
       origin: "https://www.reddit.com",
       mode: "protected",
     });
+  });
+
+  it("live-reconciles a fallback contextual action after its policy save", async () => {
+    const image = document.createElement("img");
+    vi.spyOn(image, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 320, 200));
+    document.body.append(image);
+    const observer = new FakeDocumentObserver();
+    const renderer = rendererHarness();
+    let policyListener: ((mode: SiteMode) => void) | undefined;
+    const setSiteMode = vi.fn(async (_origin: string, mode: SiteMode) => {
+      policyListener?.(mode);
+    });
+    const controller = new ContentController({
+      document,
+      observer,
+      renderer,
+      classify: (element) => element === image ? candidate(image, "image") : null,
+      resolveDescription: () => "A quiet lake",
+      enableSiteControl: true,
+      setSiteMode,
+    });
+    const dependencies = bootstrapHarness({
+      sendMessage: vi.fn().mockRejectedValue(new Error("worker unavailable")),
+      createController: () => controller,
+      watchPolicy: vi.fn((_origin, listener) => {
+        policyListener = listener;
+        return vi.fn();
+      }),
+    }).dependencies;
+
+    await bootstrapContentScript(dependencies);
+    observer.emit([image]);
+    const action = renderer.activeFor(image)[0]?.options.siteControl;
+    expect(action?.mode).toBe("protected");
+
+    await action?.save();
+    observer.emit([image]);
+
+    expect(setSiteMode).toHaveBeenCalledWith("https://child.example", "protected");
+    expect(renderer.activeFor(image)).toHaveLength(1);
+    expect(renderer.activeFor(image)[0]?.options.mode).toBe("protected");
+    expect(renderer.activeFor(image)[0]?.options.siteControl?.mode).toBe("trusted");
   });
 
   it("starts the returned policy and watches only its exact top origin", async () => {

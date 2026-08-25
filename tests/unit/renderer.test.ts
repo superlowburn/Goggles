@@ -243,6 +243,32 @@ describe("ProtectionRenderer", () => {
       .toBe("Always frost images here");
   });
 
+  it("removes and restores Always show as a revealed item crosses the size gate", () => {
+    const frames = frameQueue();
+    const image = document.createElement("img");
+    const box = vi.spyOn(image, "getBoundingClientRect").mockReturnValue(rect(0, 0, 320, 200));
+    document.body.append(image);
+    const renderer = new ProtectionRenderer({ ...frames.environment });
+    const handle = protect(renderer, image, {
+      siteControl: { mode: "trusted", save: vi.fn().mockResolvedValue(undefined) },
+    });
+    handle.reveal();
+    expect(renderer.debugLayerFor(image)?.querySelector(".eg-site-action")?.textContent)
+      .toBe("Always show images here");
+
+    box.mockReturnValue(rect(0, 0, 279, 180));
+    handle.update();
+    frames.flush();
+    expect(renderer.debugLayerFor(image)?.querySelector(".eg-site-action")).toBeNull();
+    expect(renderer.debugLayerFor(image)?.querySelector(".eg-reprotect")).not.toBeNull();
+
+    box.mockReturnValue(rect(0, 0, 320, 200));
+    handle.update();
+    frames.flush();
+    expect(renderer.debugLayerFor(image)?.querySelector(".eg-site-action")?.textContent)
+      .toBe("Always show images here");
+  });
+
   it("renders an isolated frost layer over one media item", () => {
     const image = document.createElement("img");
     vi.spyOn(image, "getBoundingClientRect").mockReturnValue(rect(20, 30, 640, 360));

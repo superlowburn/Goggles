@@ -9,7 +9,13 @@ export interface ProtectionHandle {
   update(): void;
   setBlockedSubject(blocked: boolean): void;
   setDescriptionVisible(visible: boolean): void;
+  setPolicy(mode: SiteMode, siteControl?: SiteControl): void;
   isRevealed(): boolean;
+}
+
+export interface SiteControl {
+  mode: "protected" | "trusted";
+  save: () => Promise<void>;
 }
 
 export interface ProtectionOptions {
@@ -18,10 +24,7 @@ export interface ProtectionOptions {
   mode: SiteMode;
   onToggleDescriptions: () => void;
   descriptionsVisible: boolean;
-  siteControl?: {
-    mode: "protected" | "trusted";
-    save: () => Promise<void>;
-  };
+  siteControl?: SiteControl;
 }
 
 export interface RendererEnvironment {
@@ -108,6 +111,7 @@ export class ProtectionRenderer {
       update: () => this.scheduleRecordUpdate(record),
       setBlockedSubject: (blocked) => this.setRecordBlockedSubject(record, blocked),
       setDescriptionVisible: (visible) => this.setRecordDescriptionVisible(record, visible),
+      setPolicy: (mode, siteControl) => this.setRecordPolicy(record, mode, siteControl),
       isRevealed: () => record.revealed,
     };
 
@@ -201,13 +205,11 @@ export class ProtectionRenderer {
       record.layer.querySelector(".eg-reveal-surface");
     record.revealed = true;
     const box = record.candidate.element.getBoundingClientRect();
-    const hasSiteAction = Boolean(record.siteControl) && isSiteControlEligible(record.candidate, box);
-    record.layer.className = `eg-layer eg-revealed${hasSiteAction ? " eg-has-site-action" : ""}`;
+    record.layer.className = "eg-layer eg-revealed";
     const reprotect = this.createIconButton("eg-reprotect", "Frost again", "undo");
     reprotect.addEventListener("click", (event) => this.activate(record, event, "reprotect"));
-    const children = [reprotect];
-    if (hasSiteAction) children.push(this.createSiteAction(record));
-    record.layer.replaceChildren(...children);
+    record.layer.replaceChildren(reprotect);
+    this.syncRevealedSiteAction(record, box);
     if (keepFocus) reprotect.focus();
     record.candidate.element.removeAttribute("data-eclipse-goggles-protected");
     this.updateRecord(record);
@@ -237,7 +239,10 @@ export class ProtectionRenderer {
       event.stopPropagation();
       record.siteActionBusy = true;
       void control.save().then(() => {
+        record.siteControl = undefined;
         action.remove();
+        record.layer.classList.remove("eg-has-site-action");
+        this.updateRecord(record);
       }).catch(() => {
         action.textContent = "Couldn't save. Try again.";
         action.setAttribute("aria-label", action.textContent);
@@ -379,6 +384,25 @@ export class ProtectionRenderer {
     this.updateDescriptionState(record);
   }
 
+  private setRecordPolicy(
+    record: ProtectionRecord,
+    mode: SiteMode,
+    siteControl?: SiteControl,
+  ): void {
+    record.mode = mode;
+    record.siteControl = siteControl;
+    if (record.revealed && !record.passive) this.updateRecord(record);
+  }
+
+  private syncRevealedSiteAction(record: ProtectionRecord, box: DOMRect): void {
+    if (!record.revealed || record.passive) return;
+    const existing = record.layer.querySelector(".eg-site-action");
+    const shouldShow = Boolean(record.siteControl) && isSiteControlEligible(record.candidate, box);
+    if (shouldShow && !existing) record.layer.append(this.createSiteAction(record));
+    if (!shouldShow) existing?.remove();
+    record.layer.classList.toggle("eg-has-site-action", shouldShow);
+  }
+
   private setRecordBlockedSubject(record: ProtectionRecord, blocked: boolean): void {
     if (record.blockedSubject === blocked) return;
     record.blockedSubject = blocked;
@@ -407,6 +431,7 @@ export class ProtectionRenderer {
     ) {
       this.renderSiteCandidate(record, box);
     }
+    if (record.revealed && !record.passive) this.syncRevealedSiteAction(record, box);
     const infoControl = record.layer.querySelector<HTMLElement>(".eg-info-control");
     if (infoControl) infoControl.hidden = !showInfo;
     if (record.passive || (record.revealed && record.layer.classList.contains("eg-has-site-action"))) {
