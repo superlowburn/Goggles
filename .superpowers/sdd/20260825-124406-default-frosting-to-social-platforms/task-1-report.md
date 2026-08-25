@@ -70,3 +70,26 @@ Implemented and committed as `7641c828f6977581047df2205f3a43856f0c7738`.
 - The concurrency regression holds migration at its legacy snapshot, begins a social `policy:set-tab`, then verifies migration writes `trusted` before the waiting user write persists `protected`.
 - Defaults now explicitly cover all eight platform IDs and the `twitter.com` X alias.
 - The delivery-level live visual QA concern above remains unchanged.
+
+## Round 2 review fix
+
+### Status
+
+Implemented and committed as `e84250339e6c81990559081296c079a901a7c722`.
+
+### Red command and expected failure
+
+- `npm test -- tests/unit/service-worker.test.ts` — 1 failure: the first transient `storage.get(null)` rejection propagated through `handleExtensionMessage` instead of returning a defined policy response.
+
+### Green commands and exact results
+
+- `npm test -- tests/unit/service-worker.test.ts` — 1 file passed, 14 tests passed.
+- `npm run test:unit` — 20 files passed, 234 tests passed.
+- `npm run typecheck` — exit 0.
+- `npm run build` — exit 0.
+
+### Review and concerns
+
+- A failed migration now resolves non-blockingly and removes its `WeakMap` entry, so policy messages continue using normal safe defaults and the next message retries migration.
+- The regression covers a failed first migration, defined trusted policy responses for both requests, and exactly two migration reads.
+- The delivery-level live visual QA concern above remains unchanged.
