@@ -7,6 +7,68 @@ import { defaultTrumpKeywords } from "../../src/shared/blocked-subjects";
 import { policyKey, prepareSocialPolicies, socialPolicyKey } from "../../src/shared/site-policy";
 
 describe("handleExtensionMessage", () => {
+  it("returns effective social policies to an extension Settings sender", async () => {
+    const deps = {
+      storage: {
+        get: vi.fn().mockResolvedValue({ [socialPolicyKey("reddit")]: "trusted" }),
+        set: vi.fn(),
+      },
+      tabs: { get: vi.fn() },
+      extensionId: "extension-id",
+    };
+
+    await expect(handleExtensionMessage(
+      { type: "policy:get-social" },
+      { id: "extension-id" },
+      deps,
+    )).resolves.toEqual({
+      socialPolicies: {
+        facebook: "protected",
+        instagram: "protected",
+        reddit: "trusted",
+        x: "protected",
+        tiktok: "protected",
+        threads: "protected",
+        bluesky: "protected",
+        youtube: "protected",
+      },
+    });
+  });
+
+  it("accepts only validated social writes from its own extension", async () => {
+    const deps = {
+      storage: { get: vi.fn().mockResolvedValue({}), set: vi.fn().mockResolvedValue(undefined) },
+      tabs: { get: vi.fn() },
+      extensionId: "extension-id",
+    };
+
+    await expect(handleExtensionMessage(
+      { type: "policy:set-social", platform: "reddit", mode: "trusted" },
+      { id: "extension-id" },
+      deps,
+    )).resolves.toEqual({ platform: "reddit", mode: "trusted" });
+    expect(deps.storage.set).toHaveBeenCalledWith({ [socialPolicyKey("reddit")]: "trusted" });
+
+    for (const [message, sender] of [
+      [{ type: "policy:set-social", platform: "reddit", mode: "trusted" }, { id: "other-extension" }],
+      [{
+        type: "policy:set-social",
+        platform: "reddit",
+        mode: "trusted",
+      }, {
+        id: "extension-id",
+        tab: { id: 7, url: "https://reddit.com" },
+      }],
+      [{ type: "policy:set-social", platform: "reddit.example", mode: "trusted" }, { id: "extension-id" }],
+      [{ type: "policy:set-social", platform: "reddit", mode: "strict" }, { id: "extension-id" }],
+    ] as const) {
+      await expect(handleExtensionMessage(message, sender, deps)).resolves.toEqual({
+        error: "invalid-message",
+      });
+    }
+    expect(deps.storage.set).toHaveBeenCalledTimes(1);
+  });
+
   it("returns the sender tab policy for the current page", async () => {
     const deps = {
       storage: { get: vi.fn().mockResolvedValue({}), set: vi.fn() },

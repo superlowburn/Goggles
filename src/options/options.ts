@@ -5,10 +5,8 @@ import {
 } from "../shared/blocked-subjects";
 import {
   normalizeOrigin,
-  prepareSocialPolicies,
   socialPlatformForOrigin,
   socialPlatforms,
-  socialPolicyKey,
   type SocialPlatformId,
 } from "../shared/site-policy";
 
@@ -25,6 +23,9 @@ const socialLabels: Record<SocialPlatformId, string> = {
 };
 
 export interface OptionsChromeApi {
+  runtime: {
+    sendMessage(message: import("../shared/media-types").ExtensionMessage): Promise<unknown>;
+  };
   storage: {
     local: {
       get(keys: null | string | string[]): Promise<Record<string, unknown>>;
@@ -38,7 +39,10 @@ export async function mountOptions(
   root: HTMLElement,
   chromeApi: OptionsChromeApi,
 ): Promise<void> {
-  await prepareSocialPolicies(chromeApi.storage.local);
+  const socialResponse = await chromeApi.runtime.sendMessage({ type: "policy:get-social" });
+  if (!isSocialPoliciesResponse(socialResponse)) {
+    throw new TypeError("Invalid social policy response");
+  }
   const values = await chromeApi.storage.local.get(null);
   const blockedStore = new BlockedSubjectsStore(chromeApi.storage.local);
 
@@ -65,12 +69,11 @@ export async function mountOptions(
   const platforms = root.querySelector<HTMLElement>("#social-platforms");
   const platformStatus = root.querySelector<HTMLElement>("#social-platforms-status");
   platforms?.replaceChildren(...socialPlatforms.map(({ id }) => {
-    const key = socialPolicyKey(id);
     const toggle = document.createElement("input");
     toggle.type = "checkbox";
     toggle.setAttribute("role", "switch");
     toggle.dataset.socialPlatform = id;
-    toggle.checked = values[key] !== "trusted";
+    toggle.checked = socialResponse.socialPolicies[id] !== "trusted";
     const state = document.createElement("span");
     state.className = "platform-state";
     const updateState = (): void => { state.textContent = toggle.checked ? "On" : "Off"; };
@@ -85,8 +88,14 @@ export async function mountOptions(
       const mode = toggle.checked ? "protected" : "trusted";
       updateState();
       if (platformStatus) platformStatus.textContent = "";
-      void chromeApi.storage.local.set({ [key]: mode }).then(() => {
-        values[key] = mode;
+      void chromeApi.runtime.sendMessage({
+        type: "policy:set-social",
+        platform: id,
+        mode,
+      }).then((response) => {
+        if (!isSocialWriteResponse(response, id, mode)) {
+          throw new TypeError("Invalid social policy response");
+        }
       }).catch(() => {
         toggle.checked = prior;
         updateState();
@@ -155,7 +164,31 @@ export async function mountOptions(
   });
 }
 
+function isSocialPoliciesResponse(value: unknown): value is {
+  socialPolicies: Record<SocialPlatformId, "protected" | "trusted">;
+} {
+  if (!value || typeof value !== "object" || !("socialPolicies" in value)) return false;
+  const policies = value.socialPolicies;
+  return Boolean(policies) && typeof policies === "object" && socialPlatforms.every(({ id }) => {
+    const mode = (policies as Record<string, unknown>)[id];
+    return mode === "protected" || mode === "trusted";
+  });
+}
+
+function isSocialWriteResponse(
+  value: unknown,
+  platform: SocialPlatformId,
+  mode: "protected" | "trusted",
+): value is { platform: SocialPlatformId; mode: "protected" | "trusted" } {
+  return value !== null && typeof value === "object" &&
+    "platform" in value && value.platform === platform &&
+    "mode" in value && value.mode === mode;
+}
+
 if (typeof chrome !== "undefined" && typeof document !== "undefined") {
   const root = document.querySelector<HTMLElement>("#app");
-  if (root) void mountOptions(root, chrome);
+  if (root) void mountOptions(root, {
+    runtime: { sendMessage: (message) => chrome.runtime.sendMessage(message) },
+    storage: chrome.storage,
+  });
 }

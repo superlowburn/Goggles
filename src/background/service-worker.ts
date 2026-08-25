@@ -1,5 +1,13 @@
 import type { ExtensionMessage, PolicyContext } from "../shared/media-types";
-import { isSiteMode, normalizeOrigin, prepareSocialPolicies, SitePolicyStore } from "../shared/site-policy";
+import {
+  isSiteMode,
+  normalizeOrigin,
+  prepareSocialPolicies,
+  SitePolicyStore,
+  socialPlatforms,
+  socialPolicyKey,
+  type SocialPlatformId,
+} from "../shared/site-policy";
 import { BlockedSubjectsStore } from "../shared/blocked-subjects";
 
 type StorageArea = {
@@ -9,13 +17,14 @@ type StorageArea = {
 
 type Tab = { id?: number | undefined; url?: string | undefined };
 
-type MessageSender = { tab?: Tab };
+type MessageSender = { tab?: Tab; id?: string };
 
 type WorkerDependencies = {
   storage: StorageArea;
   tabs: { get(tabId: number): Promise<Tab> };
   openOptionsPage?: () => Promise<void>;
   policyReady?: Promise<void>;
+  extensionId?: string;
 };
 
 interface FirstRunRuntime {
@@ -27,13 +36,19 @@ interface FirstRunRuntime {
 
 type WorkerResponse = PolicyContext | { opened: true } | {
   error: "unsupported-page" | "invalid-message" | "origin-changed";
-};
+} | { socialPolicies: Record<SocialPlatformId, "protected" | "trusted"> }
+  | { platform: SocialPlatformId; mode: "protected" | "trusted" };
+
+function isSocialPlatformId(value: unknown): value is SocialPlatformId {
+  return typeof value === "string" && socialPlatforms.some(({ id }) => id === value);
+}
 
 function isExtensionMessage(message: unknown): message is ExtensionMessage {
   if (!message || typeof message !== "object" || !("type" in message)) return false;
 
   switch (message.type) {
     case "policy:get-current":
+    case "policy:get-social":
       return true;
     case "options:open":
       return true;
@@ -47,6 +62,13 @@ function isExtensionMessage(message: unknown): message is ExtensionMessage {
         isSiteMode(message.mode) &&
         "expectedOrigin" in message &&
         typeof message.expectedOrigin === "string"
+      );
+    case "policy:set-social":
+      return (
+        "platform" in message &&
+        isSocialPlatformId(message.platform) &&
+        "mode" in message &&
+        (message.mode === "protected" || message.mode === "trusted")
       );
     default:
       return false;
@@ -78,6 +100,12 @@ export async function handleExtensionMessage(
   deps: WorkerDependencies,
 ): Promise<WorkerResponse> {
   if (!isExtensionMessage(message)) return { error: "invalid-message" };
+  if (
+    (message.type === "policy:get-social" || message.type === "policy:set-social") &&
+    (sender.id !== (deps.extensionId ?? chrome.runtime.id) || sender.tab !== undefined)
+  ) {
+    return { error: "invalid-message" };
+  }
 
   await (deps.policyReady ?? prepareSocialPolicies(deps.storage));
 
@@ -90,6 +118,19 @@ export async function handleExtensionMessage(
       return { opened: true };
     case "policy:get-current":
       return contextFor(sender.tab, store, blockedSubjectsStore);
+    case "policy:get-social": {
+      const keys = socialPlatforms.map(({ id }) => socialPolicyKey(id));
+      const values = await deps.storage.get(keys);
+      return {
+        socialPolicies: Object.fromEntries(socialPlatforms.map(({ id }) => [
+          id,
+          values[socialPolicyKey(id)] === "trusted" ? "trusted" : "protected",
+        ])) as Record<SocialPlatformId, "protected" | "trusted">,
+      };
+    }
+    case "policy:set-social":
+      await deps.storage.set({ [socialPolicyKey(message.platform)]: message.mode });
+      return { platform: message.platform, mode: message.mode };
     case "policy:get-tab":
       return contextFor(await deps.tabs.get(message.tabId), store, blockedSubjectsStore);
     case "policy:set-tab": {
@@ -116,6 +157,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     tabs: chrome.tabs,
     openOptionsPage: () => chrome.runtime.openOptionsPage(),
     policyReady: productionPolicyReady,
+    extensionId: chrome.runtime.id,
   }).then(sendResponse);
   return true;
 });

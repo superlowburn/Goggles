@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { readFile } from "node:fs/promises";
 import { mountOptions, type OptionsChromeApi } from "../../src/options/options";
-import { policyKey, socialPolicyKey } from "../../src/shared/site-policy";
+import { handleExtensionMessage } from "../../src/background/service-worker";
+import {
+  policyKey,
+  prepareSocialPolicies,
+  socialPlatforms,
+  socialPolicyKey,
+} from "../../src/shared/site-policy";
 
 function chromeApi(initial: Record<string, unknown>): OptionsChromeApi & {
   state: Record<string, unknown>;
@@ -9,6 +15,23 @@ function chromeApi(initial: Record<string, unknown>): OptionsChromeApi & {
   const state = { ...initial };
   return {
     state,
+    runtime: {
+      sendMessage: vi.fn(async (message: { type: string; platform?: string; mode?: string }) => {
+        if (message.type === "policy:get-social") {
+          return {
+            socialPolicies: Object.fromEntries(socialPlatforms.map(({ id }) => [
+              id,
+              state[socialPolicyKey(id)] === "trusted" ? "trusted" : "protected",
+            ])),
+          };
+        }
+        if (message.type === "policy:set-social" && message.platform && message.mode) {
+          state[`social-policy:${message.platform}`] = message.mode;
+          return { platform: message.platform, mode: message.mode };
+        }
+        return { error: "invalid-message" };
+      }),
+    },
     storage: {
       local: {
         get: async () => ({ ...state }),
@@ -71,7 +94,7 @@ describe("mountOptions", () => {
 
   it("persists each social switch independently and rolls back failed writes inline", async () => {
     const api = chromeApi({ [socialPolicyKey("reddit")]: "trusted" });
-    const set = vi.spyOn(api.storage.local, "set");
+    const sendMessage = vi.spyOn(api.runtime, "sendMessage");
     await mountOptions(document.querySelector("#app")!, api);
     const facebook = document.querySelector<HTMLInputElement>('[data-social-platform="facebook"]')!;
     const reddit = document.querySelector<HTMLInputElement>('[data-social-platform="reddit"]')!;
@@ -81,7 +104,7 @@ describe("mountOptions", () => {
     await vi.waitFor(() => expect(api.state[socialPolicyKey("facebook")]).toBe("trusted"));
     expect(api.state[socialPolicyKey("reddit")]).toBe("trusted");
 
-    set.mockRejectedValueOnce(new Error("storage unavailable"));
+    sendMessage.mockRejectedValueOnce(new Error("worker unavailable"));
     reddit.checked = true;
     reddit.dispatchEvent(new Event("change", { bubbles: true }));
     await vi.waitFor(() => expect(reddit.checked).toBe(false));
@@ -90,7 +113,7 @@ describe("mountOptions", () => {
     expect(api.state[socialPolicyKey("reddit")]).toBe("trusted");
   });
 
-  it("waits for legacy social migration before rendering or writing platform switches", async () => {
+  it("waits for the worker migration before rendering and lets the later Settings write win", async () => {
     const legacyKey = policyKey("https://old.reddit.com");
     const platformKey = socialPolicyKey("reddit");
     const state: Record<string, unknown> = { [legacyKey]: "trusted" };
@@ -108,7 +131,23 @@ describe("mountOptions", () => {
       set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(state, items); }),
       remove: vi.fn(async (key: string) => { delete state[key]; }),
     };
-    const mounting = mountOptions(document.querySelector("#app")!, { storage: { local: storage } });
+    const policyReady = prepareSocialPolicies(storage);
+    const runtime = {
+      sendMessage: vi.fn((message: unknown) => handleExtensionMessage(
+        message,
+        { id: "extension-id" },
+        {
+          storage,
+          tabs: { get: vi.fn() },
+          extensionId: "extension-id",
+          policyReady,
+        },
+      )),
+    };
+    const mounting = mountOptions(document.querySelector("#app")!, {
+      storage: { local: storage },
+      runtime,
+    });
     expect(document.querySelectorAll("[data-social-platform]")).toHaveLength(0);
 
     resolveMigration({ ...state });
@@ -120,6 +159,11 @@ describe("mountOptions", () => {
     reddit.checked = true;
     reddit.dispatchEvent(new Event("change", { bubbles: true }));
     await vi.waitFor(() => expect(state[platformKey]).toBe("protected"));
+    expect(runtime.sendMessage).toHaveBeenLastCalledWith({
+      type: "policy:set-social",
+      platform: "reddit",
+      mode: "protected",
+    });
     expect(storage.set).toHaveBeenNthCalledWith(2, { [platformKey]: "protected" });
   });
 

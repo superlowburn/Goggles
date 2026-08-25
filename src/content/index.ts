@@ -103,9 +103,19 @@ export async function bootstrapContentScript(
       mode = nextMode;
       if (started) controller.applyMode(nextMode);
     });
+    let currentBlockedSubjects: BlockedSubjectsConfig | null = null;
+    stopWatchingBlockedSubjects = dependencies.watchBlockedSubjects((config) => {
+      currentBlockedSubjects = config;
+      if (started) controller.applyBlockedSubjects(config);
+    });
+    const blockedSubjects = await dependencies.getBlockedSubjects()
+      .catch(() => ({ enabled: false, keywords: [] }));
+    currentBlockedSubjects ??= blockedSubjects;
+    if (disposed) return;
     controller.start({
       origin,
       mode,
+      ...(currentBlockedSubjects.enabled ? { blockedSubjects: currentBlockedSubjects } : {}),
     });
     started = true;
   }

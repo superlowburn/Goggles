@@ -15,6 +15,7 @@ import type {
 } from "../../src/protection/renderer";
 import { ProtectionRenderer } from "../../src/protection/renderer";
 import { classifyElement } from "../../src/media/classifier";
+import type { BlockedSubjectsConfig } from "../../src/shared/blocked-subjects";
 
 class FakeDocumentObserver implements DocumentObserverPort {
   readonly start = vi.fn((callback: (elements: readonly Element[]) => void) => {
@@ -906,6 +907,58 @@ describe("content-script bootstrap", () => {
     expect(renderer.activeFor(image)).toHaveLength(1);
     expect(renderer.activeFor(image)[0]?.options.mode).toBe("protected");
     expect(renderer.activeFor(image)[0]?.options.siteControl?.mode).toBe("trusted");
+  });
+
+  it("keeps configured subject matches frosted after fallback Always show", async () => {
+    const subject = document.createElement("img");
+    subject.alt = "Donald Trump at an event";
+    const ordinary = document.createElement("img");
+    ordinary.alt = "A quiet lake";
+    vi.spyOn(subject, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 320, 200));
+    vi.spyOn(ordinary, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 220, 320, 200));
+    document.body.append(subject, ordinary);
+    const observer = new FakeDocumentObserver();
+    const renderer = new ProtectionRenderer({ trustedActivation: () => true });
+    let policyListener: ((mode: SiteMode) => void) | undefined;
+    let subjectListener: ((config: BlockedSubjectsConfig) => void) | undefined;
+    const setSiteMode = vi.fn(async (_origin: string, mode: SiteMode) => policyListener?.(mode));
+    const controller = new ContentController({
+      document,
+      observer,
+      renderer,
+      classify: (element) => element === subject
+        ? candidate(subject, "image")
+        : element === ordinary ? candidate(ordinary, "image") : null,
+      resolveDescription: (media) => media.element.getAttribute("alt") ?? "",
+      enableSiteControl: true,
+      setSiteMode,
+    });
+    const harness = bootstrapHarness({
+      href: "https://old.reddit.com/r/goggles",
+      sendMessage: vi.fn().mockRejectedValue(new Error("worker unavailable")),
+      createController: () => controller,
+      getBlockedSubjects: vi.fn().mockResolvedValue({ enabled: true, keywords: ["Trump"] }),
+      watchPolicy: vi.fn((_origin, listener) => {
+        policyListener = listener;
+        return vi.fn();
+      }),
+      watchBlockedSubjects: vi.fn((listener) => {
+        subjectListener = listener;
+        return vi.fn();
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    observer.emit([subject, ordinary]);
+    const ordinaryLayer = renderer.debugLayerFor(ordinary)!;
+    ordinaryLayer.querySelector<HTMLButtonElement>(".eg-reveal-surface")!.click();
+    ordinaryLayer.querySelector<HTMLButtonElement>(".eg-site-action")!.click();
+    await vi.waitFor(() => expect(setSiteMode).toHaveBeenCalledWith("https://old.reddit.com", "trusted"));
+
+    expect(subjectListener).toBeTypeOf("function");
+    expect(renderer.debugLayerFor(subject)?.querySelector(".eg-reveal-surface")).not.toBeNull();
+    expect(subject.getAttribute("data-eclipse-goggles-protected")).toBe("image");
+    expect(renderer.debugLayerFor(ordinary)).toBeNull();
   });
 
   it("starts the returned policy and watches only its exact top origin", async () => {
