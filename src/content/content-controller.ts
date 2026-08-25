@@ -52,6 +52,7 @@ export interface ContentControllerDependencies {
 interface ProtectionRecord {
   candidate: MediaCandidate;
   handle: ProtectionHandle;
+  providerSource?: string | null;
 }
 
 export class ContentController {
@@ -159,10 +160,11 @@ export class ContentController {
           return;
         }
 
-        if (
-          existing.handle.isRevealed() &&
-          existing.candidate.kind !== "video-iframe"
-        ) {
+        if (existing.handle.isRevealed() && (
+          existing.candidate.kind !== "video-iframe" ||
+          (element instanceof HTMLIFrameElement &&
+            element.getAttribute("src") === existing.providerSource)
+        )) {
           existing.handle.update();
           return;
         }
@@ -201,7 +203,13 @@ export class ContentController {
       onToggleDescriptions: () => this.toggleDescriptions(),
       descriptionsVisible: this.descriptionsVisible,
     });
-    const record = { candidate, handle };
+    const record: ProtectionRecord = {
+      candidate,
+      handle,
+      ...(candidate.kind === "video-iframe" && candidate.element instanceof HTMLIFrameElement
+        ? { providerSource: candidate.element.getAttribute("src") }
+        : {}),
+    };
     this.byElement.set(candidate.element, record);
     this.records.add(record);
     this.observer.trackLayout?.(candidate.element);

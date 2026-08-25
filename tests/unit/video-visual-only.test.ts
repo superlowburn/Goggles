@@ -36,7 +36,6 @@ describe("video protection", () => {
     const play = video.play;
     const pause = vi.spyOn(video, "pause");
     const observer = new Observer();
-    const handles: Array<{ options: ProtectionOptions; handle: ProtectionHandle }> = [];
     const renderer = {
       protect: vi.fn((_candidate: MediaCandidate, options: ProtectionOptions) => {
         const handle = {
@@ -48,7 +47,6 @@ describe("video protection", () => {
           setDescriptionVisible: vi.fn(),
           isRevealed: () => false,
         } as ProtectionHandle;
-        handles.push({ options, handle });
         return handle;
       }),
     };
@@ -67,10 +65,6 @@ describe("video protection", () => {
 
     controller.start({ origin: "https://news.example", mode: "protected" });
     observer.emit([video, frame]);
-    handles.forEach(({ handle }) => {
-      handle.reveal();
-      handle.reprotect();
-    });
 
     expect(renderer.protect).toHaveBeenCalledTimes(2);
     expect(video.play).toBe(play);
@@ -102,5 +96,30 @@ describe("video protection", () => {
     expect(video.play).toBe(play);
     expect(video.muted).toBe(false);
     expect(pause).not.toHaveBeenCalled();
+  });
+
+  it("reveal and refrost change only the provider-frame overlay", () => {
+    const frame = document.createElement("iframe");
+    const source = "https://www.youtube.com/embed/astronomy?autoplay=1&start=12";
+    frame.setAttribute("src", source);
+    vi.spyOn(frame, "getBoundingClientRect").mockReturnValue(
+      new DOMRect(0, 0, 640, 360),
+    );
+    document.body.append(frame);
+    const renderer = new ProtectionRenderer({ trustedActivation: () => true });
+    const handle = renderer.protect({ element: frame, kind: "video-iframe" }, {
+      description: "Video",
+      mode: "protected",
+      onToggleDescriptions: vi.fn(),
+      descriptionsVisible: false,
+    });
+
+    handle.reveal();
+    expect(frame.hasAttribute("data-eclipse-goggles-protected")).toBe(false);
+    expect(frame.getAttribute("src")).toBe(source);
+
+    handle.reprotect();
+    expect(frame.getAttribute("data-eclipse-goggles-protected")).toBe("video");
+    expect(frame.getAttribute("src")).toBe(source);
   });
 });

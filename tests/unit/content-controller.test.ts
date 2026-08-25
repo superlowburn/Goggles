@@ -495,6 +495,44 @@ describe("ContentController", () => {
     expect(harness.renderer.protect).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps a revealed provider frame visible through presentation-only attribute churn", () => {
+    const frame = document.createElement("iframe");
+    frame.src = "https://www.youtube.com/embed/astronomy?autoplay=1";
+    document.body.append(frame);
+    const harness = controllerHarness(
+      new Map([[frame, candidate(frame, "video-iframe")]]),
+    );
+    harness.controller.start({ origin: "https://news.example", mode: "protected" });
+    harness.observer.emit([frame]);
+    harness.renderer.items[0]?.handle.reveal();
+
+    frame.title = "Updated video title";
+    harness.observer.emit([frame], [frame]);
+
+    expect(harness.renderer.protect).toHaveBeenCalledTimes(1);
+    expect(harness.renderer.items[0]?.handle.isRevealed()).toBe(true);
+    expect(harness.renderer.items[0]?.handle.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("reclassifies a revealed provider frame after its source is replaced", () => {
+    const frame = document.createElement("iframe");
+    frame.src = "https://www.youtube.com/embed/first?autoplay=1";
+    document.body.append(frame);
+    const harness = controllerHarness(
+      new Map([[frame, candidate(frame, "video-iframe")]]),
+    );
+    harness.controller.start({ origin: "https://news.example", mode: "protected" });
+    harness.observer.emit([frame]);
+    harness.renderer.items[0]?.handle.reveal();
+
+    frame.src = "https://player.vimeo.com/video/second?autoplay=1";
+    harness.observer.emit([frame], [frame]);
+
+    expect(harness.renderer.items[0]?.handle.remove).toHaveBeenCalledTimes(1);
+    expect(harness.renderer.protect).toHaveBeenCalledTimes(2);
+    expect(harness.renderer.items[1]?.handle.isRevealed()).toBe(false);
+  });
+
   it("isolates malformed candidates and logs no page-derived values", () => {
     const broken = document.createElement("img");
     broken.alt = "private alt";
