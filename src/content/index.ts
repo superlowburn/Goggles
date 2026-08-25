@@ -1,5 +1,6 @@
 import { defaultPolicyForOrigin, isSiteMode, SitePolicyStore } from "../shared/site-policy";
 import type { ExtensionMessage, PolicyContext, SiteMode } from "../shared/media-types";
+import { supportedProviderUrl } from "../media/provider-frames";
 import { ContentController } from "./content-controller";
 import {
   BlockedSubjectsStore,
@@ -10,7 +11,7 @@ interface ContentControllerPort {
   start(context: PolicyContext): void;
   applyMode(mode: SiteMode): void;
   applyBlockedSubjects(config: BlockedSubjectsConfig): void;
-  stop(options?: { restoreMedia?: boolean }): void;
+  stop(): void;
 }
 
 interface ParentLocation {
@@ -47,7 +48,7 @@ export async function bootstrapContentScript(
     disposed = true;
     stopWatching?.();
     stopWatchingBlockedSubjects?.();
-    controller.stop({ restoreMedia: false });
+    controller.stop();
   });
 
   try {
@@ -159,14 +160,7 @@ function isEligibleDocument(
 }
 
 function isSupportedProviderDocument(page: URL): boolean {
-  if (page.protocol !== "https:") return false;
-  if (
-    page.hostname === "www.youtube.com" ||
-    page.hostname === "www.youtube-nocookie.com"
-  ) {
-    return /^\/embed\/[^/]+$/.test(page.pathname);
-  }
-  return page.hostname === "player.vimeo.com" && /^\/video\/[^/]+$/.test(page.pathname);
+  return supportedProviderUrl(page.href) !== null;
 }
 
 function isPolicyContext(value: unknown): value is PolicyContext {

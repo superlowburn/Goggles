@@ -17,7 +17,11 @@ const fixtureOrigin = "http://127.0.0.1:4173";
 const protectedSelector = "[data-eclipse-goggles-protected]";
 const youtubeFixtureUrl = "https://www.youtube.com/embed/eclipse-test?autoplay=1";
 const vimeoFixtureUrl = "https://player.vimeo.com/video/123456789?autoplay=1";
-const videoProviderUrls = [youtubeFixtureUrl, vimeoFixtureUrl] as const;
+const videoProviderUrls = [
+  youtubeFixtureUrl,
+  vimeoFixtureUrl,
+  "https://www.youtube.com/embed/child-test",
+] as const;
 const acceptanceWindow = { width: 427, height: 240 } as const;
 
 type LaunchedExtension = {
@@ -333,21 +337,6 @@ test("ships the real icon and first-run settings page", async () => {
   }
 });
 
-test("privacy enforcement rejects an unapproved provider-format URL", async () => {
-  const extension = await launchExtension({ providerFixtureUrls: videoProviderUrls });
-  const unexpectedUrl = "https://www.youtube.com/embed/unapproved-fixture";
-  await extension.context.route(unexpectedUrl, (route) => route.fulfill({
-    body: "<!doctype html><title>Rejected local provider fixture</title>",
-    contentType: "text/html",
-  }));
-  await extension.page.goto(`${fixtureOrigin}/video.html`);
-  await expect(extension.page.locator("#youtube")).toHaveAttribute("src", "about:blank");
-  await expect(extension.page.locator("#vimeo")).toHaveAttribute("src", "about:blank");
-  await extension.page.evaluate((url) => fetch(url).catch(() => undefined), unexpectedUrl);
-
-  await expect(closeExtension(extension)).rejects.toThrow(/unapproved-fixture/);
-});
-
 test("protects article images", async () => {
   const extension = await launchExtension();
   const { page } = extension;
@@ -577,116 +566,63 @@ test("converts a legacy Strict setting and leaves revealed media visible", async
   }
 });
 
-test("secures native autoplay video and reveal never starts or unmutes it", async () => {
+test("visually frosts native video without changing its playback controls", async () => {
   const extension = await launchExtension({ providerFixtureUrls: videoProviderUrls });
   const { page } = extension;
   try {
     await page.goto(`${fixtureOrigin}/video.html`);
     const video = page.locator("#native-video");
-    await expect(video).toHaveAttribute("data-eclipse-goggles-protected", "video");
-    await expect.poll(() => video.evaluate((node) => {
+    const before = await video.evaluate((node) => {
       const media = node as HTMLVideoElement;
-      return { paused: media.paused, muted: media.muted };
-    })).toEqual({ paused: true, muted: true });
-
-    const coveredTarget = await video.evaluate((node) => {
-      const box = node.getBoundingClientRect();
-      return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)?.getAttribute("data-eclipse-goggles-root") !== null;
+      return { hasOwnPlay: Object.hasOwn(media, "play"), muted: media.muted };
     });
-    expect(coveredTarget).toBe(true);
+    await expect(video).toHaveAttribute("data-eclipse-goggles-protected", "video");
+    expect(await video.evaluate((node) => {
+      const media = node as HTMLVideoElement;
+      return { hasOwnPlay: Object.hasOwn(media, "play"), muted: media.muted };
+    })).toEqual(before);
 
     await scrollDockIntoView(video, layerWithText(page, "A looping color field"));
     await revealThisWithText(page, "A looping color field").click();
     await expect(video).not.toHaveAttribute("data-eclipse-goggles-protected", "video");
     expect(await video.evaluate((node) => {
       const media = node as HTMLVideoElement;
-      return { paused: media.paused, muted: media.muted };
-    })).toEqual({ paused: true, muted: true });
-    const revealedTarget = await video.evaluate((node) => {
-      const box = node.getBoundingClientRect();
-      return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2) === node;
-    });
-    expect(revealedTarget).toBe(true);
-
-    await video.click({ position: { x: 320, y: 180 } });
-    await expect.poll(() => video.evaluate((node) => (node as HTMLVideoElement).paused)).toBe(false);
+      return { hasOwnPlay: Object.hasOwn(media, "play"), muted: media.muted };
+    })).toEqual(before);
   } finally {
     await closeExtension(extension);
   }
 });
 
-test("withholds provider requests until one exact trusted reveal and re-protection", async () => {
-  const extension = await launchExtension({
-    providerFixtureUrls: videoProviderUrls,
-    providerResponseDelayMs: 300,
-  });
+test("visually frosts provider frames without changing their sources or autoplay", async () => {
+  const extension = await launchExtension({ providerFixtureUrls: videoProviderUrls });
   const { page } = extension;
   try {
     await page.goto(`${fixtureOrigin}/video.html`);
     const youtube = page.locator("#youtube");
     const vimeo = page.locator("#vimeo");
-    await expect(youtube).toHaveAttribute("src", "about:blank");
-    await expect(vimeo).toHaveAttribute("src", "about:blank");
-    expect(extension.providerRequests).toEqual([]);
+    await expect(youtube).toHaveAttribute("src", youtubeFixtureUrl);
+    await expect(vimeo).toHaveAttribute("src", vimeoFixtureUrl);
+    await expect(youtube).toHaveAttribute("data-eclipse-goggles-protected", "video");
+    await expect(vimeo).toHaveAttribute("data-eclipse-goggles-protected", "video");
+    await expect.poll(() => extension.providerRequests.length).toBe(3);
+    expect(await extension.worker.evaluate(() => chrome.declarativeNetRequest)).toBeUndefined();
 
-    extension.allowProviderAssets();
-    const selectedNavigation = page.waitForEvent("framenavigated", {
-      predicate: (frame) => frame.url().includes("/embed/eclipse-test") &&
-        frame.url().includes("eg_eclipse_goggles="),
-    });
-    const youtubeReveal = page.getByRole("button", {
-      name: "Reveal protected media: YouTube astronomy video",
-      exact: true,
-    });
-    await scrollDockIntoView(youtube, layers(page).filter({ has: youtubeReveal }));
-    await youtubeReveal.click();
-    await expect.poll(async () => ({
-      requests: extension.providerRequests.length,
-      rules: (await extension.worker.evaluate(
-        () => chrome.declarativeNetRequest.getSessionRules(),
-      )).length,
-      protected: await youtube.getAttribute("data-eclipse-goggles-protected"),
-    })).toEqual({ requests: 1, rules: 1, protected: null });
-    expect(new URL(extension.providerRequests[0]!).pathname).toBe("/embed/eclipse-test");
-    const authorized = new URL(extension.providerRequests[0]!);
-    expect(authorized.searchParams.get("autoplay")).toBe("0");
-    expect(authorized.searchParams.get("eg_eclipse_goggles")).toBeTruthy();
-    const selectedFrame = await selectedNavigation;
-    await expect(selectedFrame.locator("[data-eclipse-goggles-root]")).toHaveCount(0);
-    expect(await youtube.getAttribute("src")).toBe(authorized.href);
-    await expect.poll(() => extension.worker.evaluate(
-      () => chrome.declarativeNetRequest.getSessionRules(),
-    )).toHaveLength(1);
-    await expect(page.locator("#youtube-twin")).toHaveAttribute("src", "about:blank");
-    await expect(vimeo).toHaveAttribute("src", "about:blank");
-
-    const reprotect = page.getByRole("button", { name: "Frost again", exact: true });
-    await reprotect.focus();
-    await reprotect.press("Enter");
-    await expect(youtube).toHaveAttribute("src", "about:blank");
-    await expect.poll(() => extension.worker.evaluate(
-      () => chrome.declarativeNetRequest.getSessionRules(),
-    )).toEqual([]);
-    await page.evaluate((original) => {
-      const later = document.createElement("iframe");
-      later.id = "later-same-url";
-      later.src = original;
-      document.body.append(later);
-    }, youtubeFixtureUrl);
-    await page.waitForTimeout(200);
-    expect(extension.providerRequests).toHaveLength(1);
-
+    await scrollDockIntoView(youtube, layerWithText(page, "YouTube astronomy video"));
+    await revealThisWithText(page, "YouTube astronomy video").click();
+    await page.getByRole("button", { name: "Frost again", exact: true }).click();
+    await expect(youtube).toHaveAttribute("src", youtubeFixtureUrl);
+    await expect(vimeo).toHaveAttribute("src", vimeoFixtureUrl);
   } finally {
     await closeExtension(extension);
   }
 });
 
-test("Trusted provider frame reloads its exact original source once without looping", async () => {
+test("Trusted provider frame keeps its exact original source", async () => {
   const extension = await launchExtension({ providerFixtureUrls: [youtubeFixtureUrl] });
   const { page, worker } = extension;
   try {
     await setMode(worker, "trusted");
-    extension.allowProviderAssets();
     await page.goto(`${fixtureOrigin}/article.html`);
     await page.evaluate((source) => {
       const frame = document.createElement("iframe");
@@ -695,27 +631,23 @@ test("Trusted provider frame reloads its exact original source once without loop
       document.body.append(frame);
     }, youtubeFixtureUrl);
     const trustedProvider = page.locator("#trusted-provider");
-    await expect(trustedProvider).toHaveAttribute("src", /eg_eclipse_goggles=/u);
-    const firstSource = await trustedProvider.getAttribute("src");
+    await expect(trustedProvider).toHaveAttribute("src", youtubeFixtureUrl);
     await page.waitForTimeout(500);
 
-    expect(await trustedProvider.getAttribute("src")).toBe(firstSource);
+    expect(await trustedProvider.getAttribute("src")).toBe(youtubeFixtureUrl);
     await trustedProvider.evaluate((frame, source) => {
       frame.setAttribute("src", source);
     }, youtubeFixtureUrl);
-    await expect.poll(() => trustedProvider.getAttribute("src")).not.toBe(firstSource);
-    await expect(trustedProvider).toHaveAttribute("src", /eg_eclipse_goggles=/u);
-    const secondSource = await trustedProvider.getAttribute("src");
+    await expect(trustedProvider).toHaveAttribute("src", youtubeFixtureUrl);
     await page.waitForTimeout(500);
 
-    expect(secondSource).not.toBe(firstSource);
-    expect(await trustedProvider.getAttribute("src")).toBe(secondSource);
+    expect(await trustedProvider.getAttribute("src")).toBe(youtubeFixtureUrl);
   } finally {
     await closeExtension(extension);
   }
 });
 
-test("protects native video in a same-origin child while gating a provider sibling", async () => {
+test("protects native video in a same-origin child while leaving a provider sibling unchanged", async () => {
   const extension = await launchExtension({ providerFixtureUrls: videoProviderUrls });
   const { page } = extension;
   try {
@@ -724,8 +656,8 @@ test("protects native video in a same-origin child while gating a provider sibli
     await expect(nested.locator("#native-video")).toHaveAttribute("data-eclipse-goggles-protected", "video");
 
     const provider = page.locator("#provider");
-    await expect(provider).toHaveAttribute("src", "about:blank");
-    expect(extension.providerRequests).toEqual([]);
+    await expect(provider).toHaveAttribute("src", "https://www.youtube.com/embed/child-test");
+    await expect.poll(() => extension.providerRequests.length).toBe(4);
   } finally {
     await closeExtension(extension);
   }

@@ -13,7 +13,6 @@ import type {
   ProtectionHandle,
   ProtectionOptions,
 } from "../../src/protection/renderer";
-import { ProviderFrameController } from "../../src/media/provider-frames";
 import { classifyElement } from "../../src/media/classifier";
 
 class FakeDocumentObserver implements DocumentObserverPort {
@@ -52,12 +51,10 @@ function rendererHarness() {
       reveal: vi.fn(() => {
         if (revealed || removed) return;
         revealed = true;
-        options.onReveal();
       }),
       reprotect: vi.fn(() => {
         if (!revealed || removed) return;
         revealed = false;
-        options.onReprotect();
       }),
       remove: vi.fn(() => {
         removed = true;
@@ -90,29 +87,12 @@ function controllerHarness(
 ) {
   const observer = new FakeDocumentObserver();
   const renderer = rendererHarness();
-  const nativeVideo = {
-    secure: vi.fn(),
-    release: vi.fn(),
-    reprotect: vi.fn(),
-    restore: vi.fn(),
-  };
-  const providerFrames = {
-    gate: vi.fn(),
-    release: vi.fn(),
-    regate: vi.fn(),
-    restore: vi.fn(),
-    trust: vi.fn(),
-    forget: vi.fn(),
-    dispose: vi.fn(),
-  };
   const classify = vi.fn((element: Element) => classifications.get(element) ?? null);
   const resolveDescription = vi.fn((media: MediaCandidate) => `Description for ${media.kind}`);
   const controller = new ContentController({
     document,
     observer,
     renderer,
-    nativeVideo,
-    providerFrames,
     classify,
     resolveDescription,
     development: false,
@@ -122,8 +102,6 @@ function controllerHarness(
     controller,
     observer,
     renderer,
-    nativeVideo,
-    providerFrames,
     classify,
     resolveDescription,
   };
@@ -141,7 +119,7 @@ beforeEach(() => {
 });
 
 describe("ContentController", () => {
-  it("observes Trusted mode only to allow dynamic provider frames without protection", () => {
+  it("observes Trusted mode without protecting unrelated dynamic media", () => {
     const image = document.createElement("img");
     const frame = document.createElement("iframe");
     frame.src = "https://www.youtube.com/embed/trusted-dynamic";
@@ -153,7 +131,6 @@ describe("ContentController", () => {
 
     expect(harness.observer.start).toHaveBeenCalledTimes(1);
     expect(harness.observer.scan).toHaveBeenCalledWith(document);
-    expect(harness.providerFrames.trust).toHaveBeenCalledWith(frame);
     expect(harness.renderer.protect).not.toHaveBeenCalled();
   });
 
@@ -293,40 +270,6 @@ describe("ContentController", () => {
     expect(harness.renderer.activeFor(providerFrame)).toHaveLength(1);
   });
 
-  it("matches a dynamic provider frame before trusting can replace its source", () => {
-    const providerFrame = document.createElement("iframe");
-    providerFrame.src = "https://www.youtube.com/embed/trump-campaign";
-    providerFrame.title = "Donald Trump campaign video";
-    const providerFrames = {
-      gate: vi.fn(),
-      release: vi.fn(),
-      regate: vi.fn(),
-      restore: vi.fn(),
-      trust: vi.fn((frame: HTMLIFrameElement) => {
-        frame.src = "about:blank";
-      }),
-      forget: vi.fn(),
-      dispose: vi.fn(),
-    };
-    const classify = vi.fn((element: Element) =>
-      element === providerFrame && providerFrame.src.includes("youtube.com")
-        ? candidate(providerFrame, "video-iframe")
-        : null,
-    );
-    const harness = controllerHarness(new Map(), { classify, providerFrames });
-
-    harness.controller.start({
-      origin: "https://news.example",
-      mode: "trusted",
-      blockedSubjects: { enabled: true, keywords: ["Trump"] },
-    });
-    document.body.append(providerFrame);
-    harness.observer.emit([providerFrame]);
-
-    expect(harness.providerFrames.trust).not.toHaveBeenCalled();
-    expect(harness.renderer.activeFor(providerFrame)).toHaveLength(1);
-  });
-
   it("adds ordinary media when a Trusted site becomes Protected without duplicating subjects", () => {
     const blockedImage = document.createElement("img");
     blockedImage.alt = "Donald Trump at a campaign event";
@@ -450,45 +393,6 @@ describe("ContentController", () => {
     );
   });
 
-  it("secures a native video before rendering and release never starts playback", () => {
-    const video = document.createElement("video");
-    document.body.append(video);
-    const play = vi.spyOn(video, "play");
-    const harness = controllerHarness(
-      new Map([[video, candidate(video, "native-video")]]),
-    );
-    harness.controller.start({ origin: "https://news.example", mode: "protected" });
-    harness.observer.emit([video]);
-
-    expect(harness.nativeVideo.secure.mock.invocationCallOrder[0]).toBeLessThan(
-      harness.renderer.protect.mock.invocationCallOrder[0]!,
-    );
-    harness.renderer.items[0]?.handle.reveal();
-
-    expect(harness.nativeVideo.release).toHaveBeenCalledWith(video);
-    expect(play).not.toHaveBeenCalled();
-  });
-
-  it("reprotects only the selected strict native video", () => {
-    const first = document.createElement("video");
-    const second = document.createElement("video");
-    document.body.append(first, second);
-    const harness = controllerHarness(
-      new Map([
-        [first, candidate(first, "native-video")],
-        [second, candidate(second, "native-video")],
-      ]),
-    );
-    harness.controller.start({ origin: "https://news.example", mode: "strict" });
-    harness.observer.emit([first, second]);
-
-    harness.renderer.items[0]?.handle.reveal();
-    harness.renderer.items[0]?.handle.reprotect();
-
-    expect(harness.nativeVideo.reprotect).toHaveBeenCalledTimes(1);
-    expect(harness.nativeVideo.reprotect).toHaveBeenCalledWith(first);
-  });
-
   it("persists the site description choice and applies it to current and future media", () => {
     const first = document.createElement("img");
     const second = document.createElement("img");
@@ -522,55 +426,7 @@ describe("ContentController", () => {
     expect(secondOptions.descriptionsVisible).toBe(true);
   });
 
-  it("gates a provider before rendering and releases or regates only that frame", () => {
-    const frame = document.createElement("iframe");
-    frame.src = "https://www.youtube.com/embed/abc?start=10";
-    document.body.append(frame);
-    const harness = controllerHarness(
-      new Map([[frame, candidate(frame, "video-iframe")]]),
-    );
-    harness.controller.start({ origin: "https://news.example", mode: "strict" });
-    harness.observer.emit([frame]);
-
-    expect(harness.providerFrames.gate.mock.invocationCallOrder[0]).toBeLessThan(
-      harness.renderer.protect.mock.invocationCallOrder[0]!,
-    );
-    harness.renderer.items[0]?.handle.reveal();
-    harness.renderer.items[0]?.handle.reprotect();
-
-    expect(harness.providerFrames.release).toHaveBeenCalledWith(frame);
-    expect(harness.providerFrames.regate).toHaveBeenCalledWith(frame);
-  });
-
-  it("re-protects and emits only a sanitized diagnostic when a provider allow rule fails", async () => {
-    const frame = document.createElement("iframe");
-    frame.src = "https://www.youtube.com/embed/private-video";
-    document.body.append(frame);
-    const log = vi.fn();
-    const providerFrames = {
-      gate: vi.fn(),
-      release: vi.fn().mockRejectedValue(new Error("secret provider URL failed")),
-      regate: vi.fn(),
-      restore: vi.fn(),
-      trust: vi.fn(),
-      forget: vi.fn(),
-    };
-    const harness = controllerHarness(
-      new Map([[frame, candidate(frame, "video-iframe")]]),
-      { providerFrames, development: true, logDiagnostic: log },
-    );
-    harness.controller.start({ origin: "https://news.example", mode: "protected" });
-    harness.observer.emit([frame]);
-
-    harness.renderer.items[0]?.handle.reveal();
-
-    await vi.waitFor(() => expect(harness.renderer.items[0]?.handle.isRevealed()).toBe(false));
-    expect(providerFrames.regate).toHaveBeenCalledWith(frame);
-    expect(log).toHaveBeenCalledWith("IFRAME", "provider allow rule failed");
-    expect(JSON.stringify(log.mock.calls)).not.toContain("secret");
-  });
-
-  it("switching to Trusted removes layers and restores native and provider state", () => {
+  it("switching to Trusted removes image and video layers", () => {
     const image = document.createElement("img");
     const video = document.createElement("video");
     const frame = document.createElement("iframe");
@@ -593,38 +449,6 @@ describe("ContentController", () => {
       (removes: Array<ReturnType<typeof vi.fn>>) =>
         removes.every((remove) => remove.mock.calls.length === 1),
     );
-    expect(harness.nativeVideo.restore).toHaveBeenCalledWith(video);
-    expect(harness.providerFrames.restore).toHaveBeenCalledWith(frame);
-  });
-
-  it("forgets provider state without a restore allow rule during page teardown", () => {
-    const frame = document.createElement("iframe");
-    document.body.append(frame);
-    const harness = controllerHarness(
-      new Map([[frame, candidate(frame, "video-iframe")]]),
-    );
-    harness.controller.start({ origin: "https://news.example", mode: "protected" });
-    harness.observer.emit([frame]);
-
-    harness.controller.stop({ restoreMedia: false });
-
-    expect(harness.providerFrames.forget).toHaveBeenCalledWith(frame);
-    expect(harness.providerFrames.restore).not.toHaveBeenCalled();
-    expect(harness.providerFrames.dispose).toHaveBeenCalledTimes(1);
-  });
-
-  it("disposes Trusted provider state during page teardown", () => {
-    const frame = document.createElement("iframe");
-    frame.src = "https://www.youtube.com/embed/trusted";
-    document.body.append(frame);
-    const harness = controllerHarness();
-    harness.controller.start({ origin: "https://news.example", mode: "trusted" });
-    harness.observer.emit([frame]);
-
-    harness.controller.stop({ restoreMedia: false });
-
-    expect(harness.providerFrames.dispose).toHaveBeenCalledTimes(1);
-    expect(harness.providerFrames.restore).not.toHaveBeenCalled();
   });
 
   it("keeps a deliberately revealed subject visible across a legacy Strict transition", () => {
@@ -734,7 +558,7 @@ describe("ContentController", () => {
     }
   });
 
-  it("keeps native protection during attribute churn and continues the batch", () => {
+  it("rebuilds a native-video overlay during attribute churn and continues the batch", () => {
     const video = document.createElement("video");
     const healthyImage = document.createElement("img");
     document.body.append(video, healthyImage);
@@ -750,56 +574,11 @@ describe("ContentController", () => {
 
     harness.observer.emit([video, healthyImage], [video]);
 
-    expect(harness.nativeVideo.reprotect).toHaveBeenCalledWith(video);
-    expect(harness.nativeVideo.restore).not.toHaveBeenCalled();
-    expect(harness.renderer.items[0]?.handle.remove).not.toHaveBeenCalled();
-    expect(harness.renderer.protect).toHaveBeenCalledTimes(2);
-    expect(harness.renderer.items[1]?.candidate).toBe(imageCandidate);
-  });
-
-  it("regates an externally replaced provider source and reveals that exact new source", async () => {
-    const frame = document.createElement("iframe");
-    frame.setAttribute("src", "https://www.youtube.com/embed/first?start=10#one");
-    document.body.append(frame);
-    const media = candidate(frame, "video-iframe");
-    const navigate = vi.fn();
-    const realProviderFrames = new ProviderFrameController({
-      authorize: async (source, disableAutoplay) => {
-        const url = new URL(source);
-        if (disableAutoplay) url.searchParams.set("autoplay", "0");
-        url.searchParams.set("eg_eclipse_goggles", "controller-token");
-        return { grantId: 91, source: url.href };
-      },
-      revoke: vi.fn().mockResolvedValue(undefined),
-    }, {
-      prepare: vi.fn().mockResolvedValue(undefined),
-      navigate,
-    });
-    const harness = controllerHarness(new Map([[frame, media]]), {
-      providerFrames: realProviderFrames,
-    });
-    harness.controller.start({ origin: "https://news.example", mode: "protected" });
-    harness.observer.emit([frame]);
-    expect(frame.getAttribute("src")).toBe("https://www.youtube.com/embed/first?start=10#one");
-
-    const replacement = "https://player.vimeo.com/video/456?autoplay=0#two";
-    frame.setAttribute("src", replacement);
-    harness.observer.emit([frame], [frame]);
-
     expect(harness.renderer.items[0]?.handle.remove).toHaveBeenCalledTimes(1);
-    expect(harness.renderer.protect).toHaveBeenCalledTimes(2);
-    expect(frame.getAttribute("src")).toBe(replacement);
-    harness.renderer.items[1]?.handle.reveal();
-    await vi.waitFor(() => {
-      expect(navigate).toHaveBeenCalledTimes(1);
-      const released = new URL(navigate.mock.calls[0]![1]);
-      expect(released.origin + released.pathname).toBe("https://player.vimeo.com/video/456");
-      expect(released.searchParams.get("autoplay")).toBe("0");
-      expect(released.searchParams.get("eg_eclipse_goggles")).toBe("controller-token");
-      expect(released.hash).toBe("#two");
-      expect(frame.getAttribute("src")).toBe(replacement);
-    });
+    expect(harness.renderer.protect).toHaveBeenCalledTimes(3);
+    expect(harness.renderer.items[2]?.candidate).toBe(imageCandidate);
   });
+
 });
 
 function bootstrapHarness(
@@ -1110,7 +889,7 @@ describe("content-script bootstrap", () => {
     expect(harness.controller.start).not.toHaveBeenCalled();
   });
 
-  it("stops policy watching and discards provider grants without restoring on pagehide", async () => {
+  it("stops policy watching and removes visual layers on pagehide", async () => {
     const stopWatching = vi.fn();
     const harness = bootstrapHarness({ watchPolicy: vi.fn(() => stopWatching) });
     await bootstrapContentScript(harness.dependencies);
@@ -1121,7 +900,7 @@ describe("content-script bootstrap", () => {
     onPageHide?.();
 
     expect(stopWatching).toHaveBeenCalledTimes(1);
-    expect(harness.controller.stop).toHaveBeenCalledWith({ restoreMedia: false });
+    expect(harness.controller.stop).toHaveBeenCalledWith();
   });
 
   it("does not start after pagehide wins a pending policy lookup", async () => {
@@ -1139,7 +918,7 @@ describe("content-script bootstrap", () => {
     resolvePolicy({ origin: "https://top.example", mode: "strict" });
     await bootstrap;
 
-    expect(harness.controller.stop).toHaveBeenCalledWith({ restoreMedia: false });
+    expect(harness.controller.stop).toHaveBeenCalledWith();
     expect(harness.controller.start).not.toHaveBeenCalled();
     expect(harness.watchPolicy).not.toHaveBeenCalled();
   });

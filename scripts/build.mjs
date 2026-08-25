@@ -27,8 +27,6 @@ await Promise.all([
 
 await Promise.all([
   cp("public/manifest.json", "dist/manifest.json"),
-  cp("public/provider-rules.json", "dist/provider-rules.json"),
-  cp("public/provider-blocked.html", "dist/provider-blocked.html"),
   cp("src/popup/popup.html", "dist/popup/popup.html"),
   cp("src/popup/popup.css", "dist/popup/popup.css"),
   cp("src/options/options.html", "dist/options/options.html"),

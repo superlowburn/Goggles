@@ -16,10 +16,8 @@ export interface ProtectionOptions {
   description: string;
   blockedSubject?: boolean;
   mode: SiteMode;
-  onReveal: () => void;
   onToggleDescriptions: () => void;
   descriptionsVisible: boolean;
-  onReprotect: () => void;
 }
 
 export interface RendererEnvironment {
@@ -37,9 +35,7 @@ interface ProtectionRecord {
   blockedSubject: boolean;
   host: HTMLElement;
   layer: HTMLDivElement;
-  onReveal: () => void;
   onToggleDescriptions: () => void;
-  onReprotect: () => void;
   descriptionVisible: boolean;
   pageDescriptionsVisible: boolean;
   mode: SiteMode;
@@ -107,9 +103,7 @@ export class ProtectionRenderer {
       blockedSubject: options.blockedSubject ?? false,
       host,
       layer,
-      onReveal: options.onReveal,
       onToggleDescriptions: options.onToggleDescriptions,
-      onReprotect: options.onReprotect,
       descriptionVisible: options.descriptionsVisible,
       pageDescriptionsVisible: options.descriptionsVisible,
       mode: options.mode,
@@ -192,7 +186,6 @@ export class ProtectionRenderer {
     record.layer.replaceChildren(reprotect);
     if (keepFocus) reprotect.focus();
     record.candidate.element.removeAttribute("data-eclipse-goggles-protected");
-    record.onReveal();
     this.updateRecord(record);
     if (record.mode === "strict") {
       record.stopStrictWatch = this.createStrictGuard().watch(record.candidate.element, () => {
@@ -212,7 +205,6 @@ export class ProtectionRenderer {
     if (keepFocus) record.layer.querySelector<HTMLButtonElement>(".eg-reveal-surface")?.focus();
     this.updateRecord(record);
     markProtected(record.candidate);
-    record.onReprotect();
   }
 
   private renderProtected(record: ProtectionRecord, box?: DOMRect): void {

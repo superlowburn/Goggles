@@ -9,23 +9,7 @@
     "48": "dist/icons/icon48.png",
     "128": "dist/icons/icon128.png"
   },
-  "permissions": ["storage", "activeTab", "declarativeNetRequestWithHostAccess", "webNavigation"],
-  "host_permissions": [
-    "https://www.youtube.com/*",
-    "https://www.youtube-nocookie.com/*",
-    "https://player.vimeo.com/*"
-  ],
-  "declarative_net_request": {
-    "rule_resources": [{
-      "id": "provider_pre_request_gate",
-      "enabled": true,
-      "path": "public/provider-rules.json"
-    }]
-  },
-  "web_accessible_resources": [{
-    "resources": ["provider-blocked.html"],
-    "matches": ["<all_urls>"]
-  }],
+  "permissions": ["storage", "activeTab"],
   "background": { "service_worker": "dist/service-worker.js" },
   "action": {
     "default_popup": "dist/popup/popup.html",

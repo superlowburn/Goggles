@@ -60,10 +60,8 @@ it("keeps the info control anchored to the media bottom-left while scrolling", (
     {
       description: "A news photograph",
       mode: "protected",
-      onReveal: vi.fn(),
       onToggleDescriptions: vi.fn(),
       descriptionsVisible: false,
-      onReprotect: vi.fn(),
     },
   );
   const layer = renderer.debugLayerFor(image);

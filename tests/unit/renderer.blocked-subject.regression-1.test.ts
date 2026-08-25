@@ -11,10 +11,8 @@ it("does not offer to trust an already Trusted site from a blocked-subject image
     description: "Donald Trump at a campaign event",
     blockedSubject: true,
     mode: "trusted",
-    onReveal: vi.fn(),
     onToggleDescriptions: vi.fn(),
     descriptionsVisible: false,
-    onReprotect: vi.fn(),
   });
 
   const layer = renderer.debugLayerFor(image);

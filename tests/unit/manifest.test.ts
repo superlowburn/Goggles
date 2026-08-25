@@ -30,61 +30,27 @@ describe("extension manifest", () => {
   it("requests only the agreed permissions", () => {
     expect(manifest.permissions.sort()).toEqual([
       "activeTab",
-      "declarativeNetRequestWithHostAccess",
       "storage",
-      "webNavigation",
     ].sort());
-    expect(manifest.host_permissions).toEqual([
-      "https://www.youtube.com/*",
-      "https://www.youtube-nocookie.com/*",
-      "https://player.vimeo.com/*",
-    ]);
+    expect(manifest.host_permissions).toBeUndefined();
   });
 
-  it("loads the browser-level provider pre-request block rules", () => {
-    const rules = JSON.parse(readFileSync("public/provider-rules.json", "utf8"));
-    expect(manifest.declarative_net_request.rule_resources).toEqual([{
-      id: "provider_pre_request_gate",
-      enabled: true,
-      path: "provider-rules.json",
-    }]);
-    expect(rules).toEqual([
-      {
-        id: 1,
-        priority: 1,
-        action: { type: "redirect", redirect: { extensionPath: "/provider-blocked.html" } },
-        condition: {
-          regexFilter: "^https://www\\.youtube\\.com/embed/[^/?#]+(?:[?#].*)?$",
-          resourceTypes: ["sub_frame"],
-        },
-      },
-      {
-        id: 2,
-        priority: 1,
-        action: { type: "redirect", redirect: { extensionPath: "/provider-blocked.html" } },
-        condition: {
-          regexFilter: "^https://www\\.youtube-nocookie\\.com/embed/[^/?#]+(?:[?#].*)?$",
-          resourceTypes: ["sub_frame"],
-        },
-      },
-      {
-        id: 3,
-        priority: 1,
-        action: { type: "redirect", redirect: { extensionPath: "/provider-blocked.html" } },
-        condition: {
-          regexFilter: "^https://player\\.vimeo\\.com/video/[^/?#]+(?:[?#].*)?$",
-          resourceTypes: ["sub_frame"],
-        },
-      },
-    ]);
+  it("ships no browser-level provider request gate", () => {
+    expect(manifest.declarative_net_request).toBeUndefined();
+    expect(manifest.web_accessible_resources).toBeUndefined();
+    expect(existsSync("public/provider-rules.json")).toBe(false);
+    expect(existsSync("public/provider-blocked.html")).toBe(false);
   });
 
   it("can be loaded unpacked from the project root after building", () => {
     expect(existsSync("manifest.json")).toBe(true);
-    expect(existsSync("provider-blocked.html")).toBe(true);
+    expect(existsSync("provider-blocked.html")).toBe(false);
     if (!existsSync("manifest.json")) return;
 
     const rootManifest = JSON.parse(readFileSync("manifest.json", "utf8"));
+    expect(rootManifest.permissions.sort()).toEqual(["activeTab", "storage"]);
+    expect(rootManifest.declarative_net_request).toBeUndefined();
+    expect(rootManifest.web_accessible_resources).toBeUndefined();
     expect(rootManifest.background.service_worker).toBe("dist/service-worker.js");
     expect(rootManifest.action.default_popup).toBe("dist/popup/popup.html");
     expect(rootManifest.content_scripts.map((script: { js: string[] }) => script.js)).toEqual([

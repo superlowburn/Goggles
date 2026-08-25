@@ -57,10 +57,8 @@ function protect(
   options: {
     kind?: MediaKind;
     mode?: SiteMode;
-    onReveal?: () => void;
     onToggleDescriptions?: () => void;
     descriptionsVisible?: boolean;
-    onReprotect?: () => void;
     description?: string;
     blockedSubject?: boolean;
   } = {},
@@ -68,10 +66,8 @@ function protect(
   const protectionOptions = {
     description: options.description ?? "A black audio component",
     mode: options.mode ?? "protected",
-    onReveal: options.onReveal ?? vi.fn(),
     onToggleDescriptions: options.onToggleDescriptions ?? vi.fn(),
     descriptionsVisible: options.descriptionsVisible ?? false,
-    onReprotect: options.onReprotect ?? vi.fn(),
     blockedSubject: options.blockedSubject ?? false,
   };
   return renderer.protect(candidate(element, options.kind), protectionOptions);
@@ -199,11 +195,10 @@ describe("ProtectionRenderer", () => {
     const image = document.createElement("img");
     vi.spyOn(image, "getBoundingClientRect").mockReturnValue(rect(20, 30, 640, 360));
     document.body.append(image);
-    const onReveal = vi.fn();
     const renderer = new ProtectionRenderer({
       trustedActivation: (event) => event instanceof MouseEvent && event.type === "click",
     });
-    const handle = protect(renderer, image, { description, onReveal });
+    const handle = protect(renderer, image, { description });
     const layer = renderer.debugLayerFor(image);
     const control = layer?.querySelector<HTMLElement>(".eg-info-control");
     const info = layer?.querySelector<HTMLButtonElement>(".eg-info-button");
@@ -224,7 +219,6 @@ describe("ProtectionRenderer", () => {
     expect(control?.classList.contains("eg-info-pinned")).toBe(true);
     expect(info?.getAttribute("aria-expanded")).toBe("true");
     expect(handle.isRevealed()).toBe(false);
-    expect(onReveal).not.toHaveBeenCalled();
   });
 
   it("pins descriptions for every item when the permanent site option is activated", () => {
@@ -321,11 +315,10 @@ describe("ProtectionRenderer", () => {
       linkActivation();
     });
     document.addEventListener("click", documentActivation, { once: true });
-    const onReveal = vi.fn();
     const renderer = new ProtectionRenderer({
       trustedActivation: (event) => event.type === "click",
     });
-    protect(renderer, image, { onReveal });
+    const handle = protect(renderer, image);
 
     const host = link.nextElementSibling as HTMLElement | null;
     const activation = new MouseEvent("click", { bubbles: true, cancelable: true });
@@ -337,7 +330,7 @@ describe("ProtectionRenderer", () => {
     expect(uncancelled).toBe(false);
     expect(linkActivation).not.toHaveBeenCalled();
     expect(documentActivation).not.toHaveBeenCalled();
-    expect(onReveal).toHaveBeenCalledTimes(1);
+    expect(handle.isRevealed()).toBe(true);
   });
 
   it("places a picture control after its nearest interactive button ancestor", () => {
@@ -365,20 +358,16 @@ describe("ProtectionRenderer", () => {
     vi.spyOn(first, "getBoundingClientRect").mockReturnValue(rect(0, 0, 640, 360));
     vi.spyOn(second, "getBoundingClientRect").mockReturnValue(rect(0, 400, 640, 360));
     document.body.append(first, second);
-    const onFirstReveal = vi.fn();
-    const onSecondReveal = vi.fn();
     const renderer = new ProtectionRenderer({
       trustedActivation: (event) => event instanceof MouseEvent && event.type === "click",
     });
-    const firstHandle = protect(renderer, first, { onReveal: onFirstReveal });
-    const secondHandle = protect(renderer, second, { onReveal: onSecondReveal });
+    const firstHandle = protect(renderer, first);
+    const secondHandle = protect(renderer, second);
 
     renderer.debugLayerFor(first)?.querySelector(".eg-reveal-surface")?.dispatchEvent(
       new MouseEvent("click", { bubbles: true }),
     );
 
-    expect(onFirstReveal).toHaveBeenCalledTimes(1);
-    expect(onSecondReveal).not.toHaveBeenCalled();
     expect(firstHandle.isRevealed()).toBe(true);
     expect(first.hasAttribute("data-eclipse-goggles-protected")).toBe(false);
     expect(secondHandle.isRevealed()).toBe(false);
@@ -422,15 +411,13 @@ describe("ProtectionRenderer", () => {
     const image = document.createElement("img");
     vi.spyOn(image, "getBoundingClientRect").mockReturnValue(rect(0, 0, 640, 360));
     document.body.append(image);
-    const onReveal = vi.fn();
     const renderer = new ProtectionRenderer();
-    const handle = protect(renderer, image, { onReveal });
+    const handle = protect(renderer, image);
 
     renderer.debugLayerFor(image)?.querySelector(".eg-reveal-surface")?.dispatchEvent(
       new MouseEvent("click", { bubbles: true }),
     );
 
-    expect(onReveal).not.toHaveBeenCalled();
     expect(handle.isRevealed()).toBe(false);
   });
 
@@ -438,7 +425,6 @@ describe("ProtectionRenderer", () => {
     const image = document.createElement("img");
     vi.spyOn(image, "getBoundingClientRect").mockReturnValue(rect(0, 0, 640, 360));
     document.body.append(image);
-    const onReveal = vi.fn();
     const renderer = new ProtectionRenderer({
       trustedActivation: (event) =>
         isTrustedActivation({
@@ -447,15 +433,13 @@ describe("ProtectionRenderer", () => {
           isTrusted: true,
         } as unknown as Event),
     });
-    const handle = protect(renderer, image, { onReveal });
+    const handle = protect(renderer, image);
     const layer = renderer.debugLayerFor(image);
 
     layer?.querySelector(".eg-reveal-surface")?.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
-    expect(onReveal).not.toHaveBeenCalled();
     expect(handle.isRevealed()).toBe(false);
 
     layer?.querySelector(".eg-reveal-surface")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    expect(onReveal).toHaveBeenCalledTimes(1);
     expect(handle.isRevealed()).toBe(true);
   });
 
@@ -465,13 +449,11 @@ describe("ProtectionRenderer", () => {
     vi.spyOn(first, "getBoundingClientRect").mockReturnValue(rect(0, 0, 640, 360));
     vi.spyOn(second, "getBoundingClientRect").mockReturnValue(rect(0, 400, 640, 360));
     document.body.append(first, second);
-    const onFirstReprotect = vi.fn();
-    const onSecondReprotect = vi.fn();
     const renderer = new ProtectionRenderer({
       trustedActivation: (event) => event instanceof MouseEvent && event.type === "click",
     });
-    const firstHandle = protect(renderer, first, { onReprotect: onFirstReprotect });
-    const secondHandle = protect(renderer, second, { onReprotect: onSecondReprotect });
+    const firstHandle = protect(renderer, first);
+    const secondHandle = protect(renderer, second);
     firstHandle.reveal();
     secondHandle.reveal();
 
@@ -479,8 +461,6 @@ describe("ProtectionRenderer", () => {
     expect(protectAgain?.querySelector(".eg-reprotect")?.getAttribute("aria-label")).toBe("Frost again");
     protectAgain?.querySelector(".eg-reprotect")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
-    expect(onFirstReprotect).toHaveBeenCalledTimes(1);
-    expect(onSecondReprotect).not.toHaveBeenCalled();
     expect(firstHandle.isRevealed()).toBe(false);
     expect(secondHandle.isRevealed()).toBe(true);
   });
