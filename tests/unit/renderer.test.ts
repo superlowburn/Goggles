@@ -85,17 +85,23 @@ afterEach(() => {
 describe("ProtectionRenderer", () => {
   it("offers an unfrosted site control only at the 96x96 size gate", () => {
     const eligible = document.createElement("img");
-    const compact = document.createElement("img");
+    const narrow = document.createElement("img");
+    const short = document.createElement("img");
     vi.spyOn(eligible, "getBoundingClientRect").mockReturnValue(rect(10, 20, 96, 96));
-    vi.spyOn(compact, "getBoundingClientRect").mockReturnValue(rect(10, 220, 95, 96));
-    document.body.append(eligible, compact);
+    vi.spyOn(narrow, "getBoundingClientRect").mockReturnValue(rect(10, 220, 95, 96));
+    vi.spyOn(short, "getBoundingClientRect").mockReturnValue(rect(120, 220, 96, 95));
+    document.body.append(eligible, narrow, short);
     const renderer = new ProtectionRenderer();
 
     protect(renderer, eligible, {
       mode: "trusted",
       siteControl: { mode: "protected", save: vi.fn().mockResolvedValue(undefined) },
     });
-    protect(renderer, compact, {
+    protect(renderer, narrow, {
+      mode: "trusted",
+      siteControl: { mode: "protected", save: vi.fn().mockResolvedValue(undefined) },
+    });
+    protect(renderer, short, {
       mode: "trusted",
       siteControl: { mode: "protected", save: vi.fn().mockResolvedValue(undefined) },
     });
@@ -104,7 +110,8 @@ describe("ProtectionRenderer", () => {
     expect(renderer.debugLayerFor(eligible)?.querySelector(".eg-site-action")?.textContent)
       .toBe("Always frost images here");
     expect(eligible.hasAttribute("data-eclipse-goggles-protected")).toBe(false);
-    expect(renderer.debugLayerFor(compact)?.querySelector(".eg-site-action")).toBeNull();
+    expect(renderer.debugLayerFor(narrow)?.querySelector(".eg-site-action")).toBeNull();
+    expect(renderer.debugLayerFor(short)?.querySelector(".eg-site-action")).toBeNull();
   });
 
   it("exposes the trusted-page control on candidate hover or keyboard focus", () => {

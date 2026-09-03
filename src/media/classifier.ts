@@ -71,7 +71,8 @@ function hasMeaningfulOverlappingCopy(
 ): boolean {
   const box = env.box(element);
   const redditLightbox = element.closest("#shreddit-media-lightbox");
-  const container = redditLightbox ?? element.ownerDocument;
+  const container = redditLightbox ?? closestImageGroup(element);
+  if (!container) return false;
   const source = element.currentSrc || element.src;
   for (const candidate of container.querySelectorAll("img[alt]")) {
     if (
@@ -86,6 +87,14 @@ function hasMeaningfulOverlappingCopy(
     if (substantiallyOverlaps(box, env.box(candidate), redditLightbox ? 0.25 : 0.5)) return true;
   }
   return false;
+}
+
+function closestImageGroup(element: HTMLImageElement): Element | null {
+  let container = element.parentElement;
+  for (let depth = 0; container && depth < 6; depth += 1, container = container.parentElement) {
+    if (container.querySelectorAll("img").length > 1) return container;
+  }
+  return null;
 }
 
 function substantiallyOverlaps(

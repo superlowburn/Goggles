@@ -290,6 +290,54 @@ test("Always show reveals current and future ordinary media and persists the exa
   }
 });
 
+test("keeps contextual controls usable on an Amazon-sized portrait image", async () => {
+  const extension = await launchExtension({ seedFixturePolicy: false });
+  const { page, worker } = extension;
+  try {
+    await worker.evaluate(() => chrome.storage.local.set({ "default-site-mode": "protected" }));
+    await page.goto(`${fixtureOrigin}/article.html`);
+    await page.evaluate(() => {
+      const image = document.createElement("img");
+      image.id = "amazon-portrait";
+      image.alt = "Amazon portrait product image";
+      image.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='163' height='200'/%3E";
+      Object.assign(image.style, { display: "block", width: "163px", height: "200px" });
+      document.body.prepend(image);
+    });
+
+    const portrait = page.locator("#amazon-portrait");
+    const alwaysFrost = page.getByRole("button", { name: "Always frost images here" }).first();
+    await alwaysFrost.focus();
+    await expect(alwaysFrost).toBeVisible();
+    const [portraitBox, frostActionBox] = await Promise.all([
+      portrait.boundingBox(),
+      alwaysFrost.boundingBox(),
+    ]);
+    expect(portraitBox).not.toBeNull();
+    expect(frostActionBox).not.toBeNull();
+    expect(frostActionBox!.x).toBeGreaterThanOrEqual(portraitBox!.x);
+    expect(frostActionBox!.x + frostActionBox!.width)
+      .toBeLessThanOrEqual(portraitBox!.x + portraitBox!.width);
+
+    await alwaysFrost.click();
+    await expect(portrait).toHaveAttribute("data-eclipse-goggles-protected", "image");
+    await revealThisWithText(page, "Amazon portrait product image").click();
+
+    const alwaysShow = page.getByRole("button", { name: "Always show images here" });
+    const frostAgain = page.getByRole("button", { name: "Frost again", exact: true }).first();
+    const [showBox, reprotectBox] = await Promise.all([
+      alwaysShow.boundingBox(),
+      frostAgain.boundingBox(),
+    ]);
+    expect(showBox).not.toBeNull();
+    expect(reprotectBox).not.toBeNull();
+    expect(showBox!.x).toBeGreaterThanOrEqual(portraitBox!.x);
+    expect(showBox!.x + showBox!.width).toBeLessThanOrEqual(reprotectBox!.x - 8);
+  } finally {
+    await closeExtension(extension);
+  }
+});
+
 test("defaults Reddit protected and keeps blocked subjects frosted when Reddit is switched Off", async () => {
   const extension = await launchExtension({
     pageFixture: {
