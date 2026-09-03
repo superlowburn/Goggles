@@ -258,7 +258,16 @@ test("Always show reveals current and future ordinary media and persists the exa
   try {
     await page.goto(`${fixtureOrigin}/article.html`);
     await revealThisWithText(page, "A moonlit lake").click();
-    await page.getByRole("button", { name: "Always show images here" }).click();
+    const alwaysShow = page.getByRole("button", { name: "Always show images here" });
+    const frostAgain = page.getByRole("button", { name: "Frost again", exact: true });
+    const actionBox = await alwaysShow.boundingBox();
+    const reprotectBox = await frostAgain.boundingBox();
+    expect(actionBox).not.toBeNull();
+    expect(reprotectBox).not.toBeNull();
+    expect(actionBox!.x + actionBox!.width).toBeLessThanOrEqual(reprotectBox!.x - 8);
+    expect(Math.abs(actionBox!.y - reprotectBox!.y)).toBeLessThanOrEqual(1);
+
+    await alwaysShow.click();
     await expect(page.locator(protectedSelector)).toHaveCount(0);
     await expect.poll(() => worker.evaluate(async ({ key }) =>
       (await chrome.storage.local.get(key))[key], { key: `site-policy:${fixtureOrigin}` }))
