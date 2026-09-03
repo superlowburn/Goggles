@@ -39,17 +39,22 @@ function rect(left: number, top: number, width: number, height: number): TestRec
 }
 
 describe("stacked image classification", () => {
-  it("skips an empty-alt backdrop that substantially overlaps a meaningful sibling", () => {
+  it("skips an empty-alt backdrop nested separately from a meaningful overlapping copy", () => {
     const { env, setRect } = environment();
-    const container = document.createElement("div");
+    const card = document.createElement("article");
+    const backdropShell = document.createElement("div");
+    const foregroundShell = document.createElement("a");
     const backdrop = document.createElement("img");
     const foreground = document.createElement("img");
-    backdrop.src = "/jazz-collage.png";
-    foreground.src = "/jazz-collage.png";
-    foreground.alt = "A collage of jazz album covers";
-    container.append(backdrop, foreground);
-    setRect(backdrop, rect(0, 0, 900, 500));
-    setRect(foreground, rect(75, 40, 750, 420));
+    backdrop.src = "/reddit-hero.png";
+    foreground.src = "/reddit-hero.png";
+    foreground.alt = "r/canada article preview";
+    backdropShell.append(backdrop);
+    foregroundShell.append(foreground);
+    card.append(backdropShell, foregroundShell);
+    document.body.append(card);
+    setRect(backdrop, rect(-72, 135, 864, 454));
+    setRect(foreground, rect(0, 173, 720, 378));
 
     expect(classifyElement(backdrop, env)).toBeNull();
     expect(classifyElement(foreground, env)).toMatchObject({

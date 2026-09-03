@@ -34,12 +34,14 @@ test("gives an overlapping Reddit lightbox stack one visible control set", async
     );
     await expect(page.getByRole("button", { name: "Show description" })).toHaveCount(0);
     await expect(page.getByRole("button", { name: /Reveal protected media/u })).toHaveCount(1);
+    await expect(page.locator("[data-eclipse-goggles-root] .eg-layer.eg-frost")).toHaveCount(1);
     await expect(page.locator("[data-eclipse-goggles-root] .eg-goggles-control")).toHaveCount(0);
     await expect(page.locator("[data-eclipse-goggles-root] .eg-menu")).toHaveCount(0);
 
     await page.getByRole("button", { name: /Reveal protected media/ }).click();
     await expect(page.locator("[data-eclipse-goggles-root] .eg-frost")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Frost again" })).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "Always show images here" })).toHaveCount(1);
   } finally {
     await context.close();
   }

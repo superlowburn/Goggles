@@ -69,24 +69,21 @@ function hasMeaningfulOverlappingCopy(
   element: HTMLImageElement,
   env: ClassificationEnvironment,
 ): boolean {
-  const parent = element.parentElement;
-  if (!parent) return false;
-
   const box = env.box(element);
   const redditLightbox = element.closest("#shreddit-media-lightbox");
-  const container = redditLightbox ?? parent;
+  const container = redditLightbox ?? element.ownerDocument;
   const source = element.currentSrc || element.src;
-  for (const sibling of container.querySelectorAll("img[alt]")) {
+  for (const candidate of container.querySelectorAll("img[alt]")) {
     if (
-      sibling === element ||
-      !(sibling instanceof HTMLImageElement) ||
-      !sibling.getAttribute("alt")?.trim() ||
-      (!redditLightbox && (sibling.currentSrc || sibling.src) !== source)
+      candidate === element ||
+      !(candidate instanceof HTMLImageElement) ||
+      !candidate.getAttribute("alt")?.trim() ||
+      (!redditLightbox && (candidate.currentSrc || candidate.src) !== source)
     ) {
       continue;
     }
 
-    if (substantiallyOverlaps(box, env.box(sibling), redditLightbox ? 0.25 : 0.5)) return true;
+    if (substantiallyOverlaps(box, env.box(candidate), redditLightbox ? 0.25 : 0.5)) return true;
   }
   return false;
 }
