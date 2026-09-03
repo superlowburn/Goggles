@@ -91,7 +91,11 @@ function hasMeaningfulOverlappingCopy(
 
 function closestImageGroup(element: HTMLImageElement): Element | null {
   let container = element.parentElement;
-  for (let depth = 0; container && depth < 6; depth += 1, container = container.parentElement) {
+  for (
+    let depth = 0;
+    container && container !== element.ownerDocument.body && depth < 6;
+    depth += 1, container = container.parentElement
+  ) {
     if (container.querySelectorAll("img").length > 1) return container;
   }
   return null;

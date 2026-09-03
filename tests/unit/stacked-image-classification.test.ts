@@ -107,19 +107,15 @@ describe("stacked image classification", () => {
     const { env, setRect } = environment();
     const firstGroup = document.createElement("article");
     const backdrop = document.createElement("img");
-    const localSibling = document.createElement("img");
     const secondGroup = document.createElement("article");
     const remoteCopy = document.createElement("img");
     backdrop.src = "/reused-photo.png";
-    localSibling.src = "/other-photo.png";
-    localSibling.alt = "Another image in the first group";
     remoteCopy.src = "/reused-photo.png";
     remoteCopy.alt = "A matching image in another post";
-    firstGroup.append(backdrop, localSibling);
+    firstGroup.append(backdrop);
     secondGroup.append(remoteCopy);
     document.body.append(firstGroup, secondGroup);
     setRect(backdrop, rect(0, 0, 640, 360));
-    setRect(localSibling, rect(700, 0, 100, 100));
     setRect(remoteCopy, rect(0, 0, 640, 360));
 
     expect(classifyElement(backdrop, env)).toMatchObject({ element: backdrop, kind: "image" });
