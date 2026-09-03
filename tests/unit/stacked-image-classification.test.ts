@@ -105,6 +105,7 @@ describe("stacked image classification", () => {
 
   it("does not deduplicate against a matching image in a different media group", () => {
     const { env, setRect } = environment();
+    const feed = document.createElement("main");
     const firstGroup = document.createElement("article");
     const backdrop = document.createElement("img");
     const secondGroup = document.createElement("article");
@@ -114,7 +115,8 @@ describe("stacked image classification", () => {
     remoteCopy.alt = "A matching image in another post";
     firstGroup.append(backdrop);
     secondGroup.append(remoteCopy);
-    document.body.append(firstGroup, secondGroup);
+    feed.append(firstGroup, secondGroup);
+    document.body.append(feed);
     setRect(backdrop, rect(0, 0, 640, 360));
     setRect(remoteCopy, rect(0, 0, 640, 360));
 
