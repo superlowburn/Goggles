@@ -70,7 +70,7 @@ export function isSiteControlEligible(
   candidate: MediaCandidate,
   box = candidate.element.getBoundingClientRect(),
 ): boolean {
-  return box.width >= 280 && box.height >= 180;
+  return box.width >= 96 && box.height >= 96;
 }
 
 export class ProtectionRenderer {

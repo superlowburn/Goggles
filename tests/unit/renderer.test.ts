@@ -83,11 +83,11 @@ afterEach(() => {
 });
 
 describe("ProtectionRenderer", () => {
-  it("offers an unfrosted site control only at the 280x180 size gate", () => {
+  it("offers an unfrosted site control only at the 96x96 size gate", () => {
     const eligible = document.createElement("img");
     const compact = document.createElement("img");
-    vi.spyOn(eligible, "getBoundingClientRect").mockReturnValue(rect(10, 20, 280, 180));
-    vi.spyOn(compact, "getBoundingClientRect").mockReturnValue(rect(10, 220, 279, 180));
+    vi.spyOn(eligible, "getBoundingClientRect").mockReturnValue(rect(10, 20, 96, 96));
+    vi.spyOn(compact, "getBoundingClientRect").mockReturnValue(rect(10, 220, 95, 96));
     document.body.append(eligible, compact);
     const renderer = new ProtectionRenderer();
 
@@ -231,7 +231,7 @@ describe("ProtectionRenderer", () => {
       siteControl: { mode: "protected", save: vi.fn().mockResolvedValue(undefined) },
     });
 
-    box.mockReturnValue(rect(0, 0, 279, 180));
+    box.mockReturnValue(rect(0, 0, 95, 96));
     handle.update();
     frames.flush();
     expect(renderer.debugLayerFor(image)?.querySelector(".eg-site-action")).toBeNull();
@@ -256,7 +256,7 @@ describe("ProtectionRenderer", () => {
     expect(renderer.debugLayerFor(image)?.querySelector(".eg-site-action")?.textContent)
       .toBe("Always show images here");
 
-    box.mockReturnValue(rect(0, 0, 279, 180));
+    box.mockReturnValue(rect(0, 0, 95, 96));
     handle.update();
     frames.flush();
     expect(renderer.debugLayerFor(image)?.querySelector(".eg-site-action")).toBeNull();

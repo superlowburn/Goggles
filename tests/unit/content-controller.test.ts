@@ -150,6 +150,21 @@ describe("ContentController", () => {
     expect(setSiteMode).toHaveBeenCalledWith("https://news.example", "protected");
   });
 
+  it("offers a frost action on an Amazon-sized portrait product image", () => {
+    const image = document.createElement("img");
+    vi.spyOn(image, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 163, 200));
+    document.body.append(image);
+    const harness = controllerHarness(new Map([[image, candidate(image, "image")]]), {
+      enableSiteControl: true,
+      setSiteMode: vi.fn(),
+    });
+
+    harness.controller.start({ origin: "https://www.amazon.ca", mode: "trusted" });
+    harness.observer.emit([image]);
+
+    expect(harness.renderer.activeFor(image)[0]?.options.siteControl?.mode).toBe("protected");
+  });
+
   it("does not add Always frost controls to a social platform switched Off", () => {
     const image = document.createElement("img");
     document.body.append(image);
@@ -164,9 +179,9 @@ describe("ContentController", () => {
     expect(harness.renderer.protect).not.toHaveBeenCalled();
   });
 
-  it("does not create a trusted-page control root below 280x180", () => {
+  it("does not create a trusted-page control root below 96x96", () => {
     const image = document.createElement("img");
-    vi.spyOn(image, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 279, 180));
+    vi.spyOn(image, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 95, 96));
     document.body.append(image);
     const harness = controllerHarness(new Map([[image, candidate(image, "image")]]), {
       enableSiteControl: true,
