@@ -200,6 +200,37 @@ h2 {
   outline: 3px solid var(--brass);
   outline-offset: 3px;
 }
+.subreddit-exceptions { margin-top: 30px; }
+.subreddit-exceptions[hidden] { display: none; }
+.subreddit-exceptions h3 {
+  margin: 0 0 8px;
+  font: 700 22px/1.15 Georgia, serif;
+}
+.subreddit-list { border-top: 1px solid var(--line); }
+.subreddit-rule {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 14px;
+  align-items: center;
+  min-height: 58px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.subreddit-rule strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.subreddit-state { color: var(--muted); font-size: 14px; }
+.subreddit-rule button {
+  min-height: 44px;
+  padding: 0 12px;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+.subreddit-rule button:disabled { cursor: wait; opacity: 0.68; }
 .subject-card {
   margin-top: 28px;
   overflow: hidden;
@@ -338,6 +369,11 @@ button:focus-visible {
   .demo-media img { min-height: 220px; height: 220px; }
   section { grid-template-columns: 1fr; gap: 4px; padding: 44px 0; }
   .add-subject-row { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 480px) {
+  .subreddit-rule { grid-template-columns: 1fr auto; }
+  .subreddit-rule button { grid-column: 1 / -1; width: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {

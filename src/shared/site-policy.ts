@@ -3,6 +3,7 @@ import type { SiteMode } from "./media-types";
 type StorageArea = {
   get(key: null | string | string[]): Promise<Record<string, unknown>>;
   set(items: Record<string, unknown>): Promise<void>;
+  remove?(key: string | string[]): Promise<void>;
 };
 
 type StorageChange = { newValue?: unknown };
@@ -20,6 +21,7 @@ const socialMigrationPromises = new WeakMap<StorageArea, Promise<void>>();
 
 const protectedMode: SiteMode = "protected";
 const trustedMode: SiteMode = "trusted";
+const redditPseudoCommunities = new Set(["all", "popular", "mod", "friends"]);
 export const defaultPolicyKey = "default-site-mode";
 
 export const socialPlatforms = [
@@ -36,12 +38,35 @@ export const socialPlatforms = [
 export type SocialPlatformId = (typeof socialPlatforms)[number]["id"];
 export type SocialPlatform = (typeof socialPlatforms)[number];
 
+export interface RedditCommunity {
+  displayName: string;
+  canonicalName: string;
+}
+
+export interface RedditPolicyContext extends RedditCommunity {
+  inheritedMode: Exclude<SiteMode, "strict">;
+  hasOverride: boolean;
+}
+
+export interface PolicyResolution {
+  mode: SiteMode;
+  reddit?: RedditPolicyContext;
+}
+
 export function policyKey(origin: string): string {
   return `site-policy:${origin}`;
 }
 
 export function socialPolicyKey(platform: SocialPlatformId): string {
   return `social-policy:${platform}`;
+}
+
+export function subredditPolicyKey(name: string): string {
+  return `reddit-subreddit-policy:${name.toLowerCase()}`;
+}
+
+export function subredditDisplayKey(name: string): string {
+  return `reddit-subreddit-display:${name.toLowerCase()}`;
 }
 
 export function descriptionsKey(origin: string): string {
@@ -71,6 +96,24 @@ export function socialPlatformForOrigin(origin: string): SocialPlatform | null {
   ) ?? null;
 }
 
+export function parseRedditCommunity(value: string): RedditCommunity | null {
+  try {
+    const url = new URL(value);
+    if (socialPlatformForOrigin(url.origin)?.id !== "reddit") return null;
+
+    const segments = url.pathname.split("/");
+    const displayName = segments[1] === "r" ? segments[2] : undefined;
+    if (!displayName || !/^[A-Za-z0-9_]{3,21}$/.test(displayName)) return null;
+
+    const canonicalName = displayName.toLowerCase();
+    if (redditPseudoCommunities.has(canonicalName)) return null;
+
+    return { displayName, canonicalName };
+  } catch {
+    return null;
+  }
+}
+
 export function defaultPolicyForOrigin(origin: string): SiteMode {
   const normalizedOrigin = normalizeOrigin(origin);
   if (!normalizedOrigin) return protectedMode;
@@ -82,6 +125,25 @@ function supportedMode(value: unknown): SiteMode | null {
   return value === "trusted" || value === "protected" ? value : null;
 }
 
+function supportedSubredditMode(value: unknown): Exclude<SiteMode, "strict"> | null {
+  return value === "trusted" || value === "protected" ? value : null;
+}
+
+function canonicalSubredditName(value: string): string | null {
+  return /^[A-Za-z0-9_]{3,21}$/.test(value) ? value.toLowerCase() : null;
+}
+
+export function isCanonicalSubredditName(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z0-9_]{3,21}$/.test(value);
+}
+
+export function isSubredditDisplayNameForCanonical(
+  value: unknown,
+  canonicalName: string,
+): value is string {
+  return typeof value === "string" && canonicalSubredditName(value) === canonicalName;
+}
+
 export class SitePolicyStore {
   constructor(
     private readonly area: StorageArea,
@@ -89,19 +151,43 @@ export class SitePolicyStore {
   ) {}
 
   async get(origin: string): Promise<SiteMode> {
-    const normalizedOrigin = normalizeOrigin(origin);
-    if (!normalizedOrigin) return defaultPolicyForOrigin(origin);
+    return (await this.resolve(origin)).mode;
+  }
+
+  async resolve(value: string): Promise<PolicyResolution> {
+    const normalizedOrigin = normalizeOrigin(value);
+    if (!normalizedOrigin) return { mode: defaultPolicyForOrigin(value) };
 
     const exactKey = policyKey(normalizedOrigin);
     const platform = socialPlatformForOrigin(normalizedOrigin);
     if (!platform) {
-      return supportedMode((await this.area.get(exactKey))[exactKey]) ?? trustedMode;
+      return { mode: supportedMode((await this.area.get(exactKey))[exactKey]) ?? trustedMode };
     }
 
     const platformKey = socialPolicyKey(platform.id);
-    const values = await this.area.get([platformKey, exactKey]);
-    if (platformKey in values) return supportedMode(values[platformKey]) ?? protectedMode;
-    return supportedMode(values[exactKey]) ?? defaultPolicyForOrigin(normalizedOrigin);
+    const community = parseRedditCommunity(value);
+    const subredditKey = community ? subredditPolicyKey(community.canonicalName) : null;
+    const values = await this.area.get([
+      ...(subredditKey ? [subredditKey] : []),
+      platformKey,
+      exactKey,
+    ]);
+    const inherited = platformKey in values
+      ? supportedMode(values[platformKey]) ?? protectedMode
+      : supportedMode(values[exactKey]) ?? protectedMode;
+    const inheritedMode: Exclude<SiteMode, "strict"> =
+      inherited === "trusted" ? "trusted" : "protected";
+    if (!community || !subredditKey) return { mode: inheritedMode };
+
+    const override = supportedSubredditMode(values[subredditKey]);
+    return {
+      mode: override ?? inheritedMode,
+      reddit: {
+        ...community,
+        inheritedMode,
+        hasOverride: override !== null,
+      },
+    };
   }
 
   async set(origin: string, mode: SiteMode): Promise<void> {
@@ -115,6 +201,30 @@ export class SitePolicyStore {
 
   async setDefault(mode: Exclude<SiteMode, "trusted">): Promise<void> {
     await this.area.set({ [defaultPolicyKey]: supportedMode(mode) ?? protectedMode });
+  }
+
+  async setSubreddit(
+    name: string,
+    mode: Exclude<SiteMode, "strict">,
+    displayName?: string,
+  ): Promise<void> {
+    const canonicalName = canonicalSubredditName(name);
+    if (!canonicalName) return;
+    await this.area.set({
+      [subredditPolicyKey(canonicalName)]: mode,
+      ...(isSubredditDisplayNameForCanonical(displayName, canonicalName)
+        ? { [subredditDisplayKey(canonicalName)]: displayName }
+        : {}),
+    });
+  }
+
+  async resetSubreddit(name: string): Promise<void> {
+    const canonicalName = canonicalSubredditName(name);
+    if (!canonicalName) return;
+    await this.area.remove?.([
+      subredditPolicyKey(canonicalName),
+      subredditDisplayKey(canonicalName),
+    ]);
   }
 
   async getDescriptionsVisible(origin: string): Promise<boolean> {
@@ -132,11 +242,18 @@ export class SitePolicyStore {
 
     const exactKey = policyKey(normalizedOrigin);
     const platform = socialPlatformForOrigin(normalizedOrigin);
-    const keys = platform ? [socialPolicyKey(platform.id), exactKey] : [exactKey];
+    const community = parseRedditCommunity(origin);
+    const keys = platform
+      ? [
+        ...(community ? [subredditPolicyKey(community.canonicalName)] : []),
+        socialPolicyKey(platform.id),
+        exactKey,
+      ]
+      : [exactKey];
     const onChange: StorageChangeListener = (changes, areaName) => {
       if (areaName !== "local" || !keys.some((key) => key in changes)) return;
 
-      void this.get(normalizedOrigin).then(listener);
+      void this.get(origin).then(listener);
     };
 
     this.onChanged?.addListener(onChange);

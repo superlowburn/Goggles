@@ -1,4 +1,4 @@
-import type { SocialPlatformId } from "./site-policy";
+import type { RedditPolicyContext, SocialPlatformId } from "./site-policy";
 
 export type SiteMode = "trusted" | "protected" | "strict";
 
@@ -16,6 +16,7 @@ export interface MediaCandidate {
 export interface PolicyContext {
   origin: string;
   mode: SiteMode;
+  reddit?: RedditPolicyContext;
   descriptionsVisible?: boolean;
   blockedSubjects?: import("./blocked-subjects").BlockedSubjectsConfig;
 }
@@ -24,6 +25,15 @@ export type ExtensionMessage =
   | { type: "policy:get-current" }
   | { type: "policy:get-tab"; tabId: number }
   | { type: "policy:set-tab"; tabId: number; mode: SiteMode; expectedOrigin: string }
+  | {
+    type: "policy:set-subreddit";
+    tabId: number;
+    expectedSubreddit: string;
+    mode: Exclude<SiteMode, "strict">;
+  }
+  | { type: "policy:reset-subreddit"; tabId: number; expectedSubreddit: string }
+  | { type: "policy:list-subreddits" }
+  | { type: "policy:reset-subreddit-setting"; canonicalName: string }
   | { type: "policy:get-social" }
   | {
     type: "policy:set-social";

@@ -1,6 +1,6 @@
 # Goggles Privacy Policy
 
-**Effective date: August 25, 2026**
+**Effective date: September 4, 2026**
 
 Goggles is a Chrome extension that frosts images and videos until you choose to reveal them. Goggles is designed to work locally in your browser.
 
@@ -13,6 +13,7 @@ To provide its features, Goggles reads media elements and related page informati
 Goggles uses Chrome's local extension storage to save:
 
 - whether ordinary media is frosted on each of the eight supported social platforms;
+- Reddit subreddit names and their optional on/off exceptions;
 - exact origins of non-social sites you choose to frost;
 - whether descriptions are shown by default on a website;
 - whether blocked-subject protection is enabled; and

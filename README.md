@@ -14,7 +14,7 @@ Less eye bleach for everyone!
 - Shows ordinary media by default on other sites.
 - Reveals one item when you click its frosting.
 - Adds contextual **Always frost images here** and **Always show images here** controls to eligible media.
-- Keeps one shared preference for each supported social platform and exact-origin rules for manually frosted non-social sites.
+- Keeps one shared preference for each supported social platform, optional per-subreddit exceptions, and exact-origin rules for manually frosted non-social sites.
 - Can keep likely images of selected subjects frosted even on sites where ordinary media is shown.
 - Shows available image descriptions without revealing the image.
 - Frosts eligible native videos and recognized YouTube and Vimeo frames visually without changing playback, sound, timing, source URLs, autoplay parameters, or provider loading.
@@ -71,12 +71,15 @@ After pulling a newer version from GitHub, run `npm install` and `npm run build`
 - Click a frosted image or video to reveal that item.
 - Click **Frost again** to cover a revealed item again.
 - On a visible non-social page, hover or focus the contextual control on sufficiently large media and choose **Always frost images here**. This saves an exact-origin rule for that site.
-- After revealing an item on a protected page, choose **Always show images here** to show ordinary current and future media. On a social platform this changes that platform's shared preference; elsewhere it changes only the exact origin.
+- After revealing an item on a protected page, choose **Always show images here** when offered to show ordinary current and future media. On Reddit, use the toolbar instead; elsewhere the contextual action changes that social platform's shared preference or the exact non-social origin.
 - Click the Goggles toolbar icon to turn ordinary-media frosting on or off for the current site or social platform.
-- Open **Settings** to configure blocked subjects, switch each of the eight social platforms independently, and remove manually frosted non-social origins.
+- On an `r/name` page, use the toolbar switch to override Reddit for that subreddit. Choose **Use Reddit setting** to remove the exception and inherit Reddit again.
+- Open **Settings** to configure blocked subjects, switch each of the eight social platforms independently, remove subreddit exceptions, and remove manually frosted non-social origins.
 - Use the small information control on sufficiently large media to read its available description.
 
 Site and social-platform preferences never override enabled blocked subjects. A likely blocked-subject match stays frosted until you deliberately reveal that item.
+
+Subreddit preferences apply only to that community. Their order is: subreddit exception, Reddit-wide setting, then Goggles' protected social default.
 
 ## Development
 

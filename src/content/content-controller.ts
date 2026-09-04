@@ -232,7 +232,11 @@ export class ContentController {
   }
 
   private siteControl(blockedSubject: boolean): SiteControl | undefined {
-    if (!this.enableSiteControl || !this.origin) return undefined;
+    if (
+      !this.enableSiteControl ||
+      !this.origin ||
+      socialPlatformForOrigin(this.origin)?.id === "reddit"
+    ) return undefined;
     if (this.mode === "trusted") {
       if (blockedSubject || socialPlatformForOrigin(this.origin)) return undefined;
       return {

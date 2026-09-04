@@ -3,11 +3,49 @@ import {
   defaultPolicyKey,
   prepareSocialPolicies,
   SitePolicyStore,
+  parseRedditCommunity,
   policyKey,
+  subredditDisplayKey,
+  subredditPolicyKey,
   socialPlatformForOrigin,
   socialPolicyKey,
   socialPlatforms,
 } from "../../src/shared/site-policy";
+
+describe("Reddit community policy", () => {
+  it.each([
+    ["https://www.reddit.com/r/OpenAI/", "OpenAI", "openai"],
+    ["https://old.reddit.com/r/BuyCanadian/comments/abc123/story", "BuyCanadian", "buycanadian"],
+    ["https://new.reddit.com/r/3D_printing/comments/abc123", "3D_printing", "3d_printing"],
+  ])("parses a verified Reddit community from %s", (url, displayName, canonicalName) => {
+    expect(parseRedditCommunity(url)).toEqual({ displayName, canonicalName });
+  });
+
+  it.each([
+    "https://reddit.com.evil.example/r/OpenAI",
+    "https://notreddit.com/r/OpenAI",
+    "https://www.reddit.com/user/example/r/OpenAI",
+    "https://www.reddit.com/search?q=r%2FOpenAI",
+    "https://www.reddit.com/r/OpenAI%2Fcomments/abc123",
+    "https://www.reddit.com/r/Open%5CAI",
+    "https://www.reddit.com/r/no-hyphens",
+    "https://www.reddit.com/r/ab",
+    "https://www.reddit.com/r/this_name_is_over_21_chars",
+  ])("rejects ambiguous or invalid community URL %s", (url) => {
+    expect(parseRedditCommunity(url)).toBeNull();
+  });
+
+  it.each(["all", "popular", "mod", "friends", "ALL", "Popular", "MOD", "Friends"])(
+    "rejects Reddit aggregate feed r/%s as a community",
+    (name) => {
+      expect(parseRedditCommunity(`https://www.reddit.com/r/${name}/`)).toBeNull();
+    },
+  );
+
+  it("creates one canonical lowercase storage key", () => {
+    expect(subredditPolicyKey("OpenAI")).toBe("reddit-subreddit-policy:openai");
+  });
+});
 
 describe("SitePolicyStore", () => {
   it("defaults non-social origins to trusted", async () => {
@@ -136,6 +174,80 @@ describe("SitePolicyStore", () => {
       .resolves.toBe("protected");
   });
 
+  it("resolves a subreddit override before the inherited Reddit-wide mode", async () => {
+    const url = "https://www.reddit.com/r/OpenAI/comments/abc123/story";
+    const area = {
+      get: vi.fn().mockResolvedValue({
+        [subredditPolicyKey("openai")]: "trusted",
+        [socialPolicyKey("reddit")]: "protected",
+      }),
+      set: vi.fn(),
+    };
+
+    await expect(new SitePolicyStore(area).resolve(url)).resolves.toEqual({
+      mode: "trusted",
+      reddit: {
+        displayName: "OpenAI",
+        canonicalName: "openai",
+        inheritedMode: "protected",
+        hasOverride: true,
+      },
+    });
+  });
+
+  it("inherits the Reddit-wide mode when a subreddit override is absent or invalid", async () => {
+    const url = "https://old.reddit.com/r/OpenAI/";
+    const area = {
+      get: vi.fn().mockResolvedValue({
+        [subredditPolicyKey("openai")]: "strict",
+        [socialPolicyKey("reddit")]: "trusted",
+      }),
+      set: vi.fn(),
+    };
+
+    await expect(new SitePolicyStore(area).resolve(url)).resolves.toEqual({
+      mode: "trusted",
+      reddit: {
+        displayName: "OpenAI",
+        canonicalName: "openai",
+        inheritedMode: "trusted",
+        hasOverride: false,
+      },
+    });
+  });
+
+  it("stores validated display casing and resets both subreddit keys", async () => {
+    const area = {
+      get: vi.fn(),
+      set: vi.fn().mockResolvedValue(undefined),
+      remove: vi.fn().mockResolvedValue(undefined),
+    };
+    const store = new SitePolicyStore(area);
+
+    await store.setSubreddit("openai", "trusted", "OpenAI");
+    await store.resetSubreddit("OPENAI");
+
+    expect(area.set).toHaveBeenCalledWith({
+      "reddit-subreddit-policy:openai": "trusted",
+      "reddit-subreddit-display:openai": "OpenAI",
+    });
+    expect(area.remove).toHaveBeenCalledWith([
+      "reddit-subreddit-policy:openai",
+      "reddit-subreddit-display:openai",
+    ]);
+  });
+
+  it("does not store mismatched subreddit display metadata", async () => {
+    const area = { get: vi.fn(), set: vi.fn().mockResolvedValue(undefined) };
+
+    await new SitePolicyStore(area).setSubreddit("openai", "trusted", "TypeScript");
+
+    expect(area.set).toHaveBeenCalledWith({
+      [subredditPolicyKey("openai")]: "trusted",
+    });
+    expect(subredditDisplayKey("openai")).toBe("reddit-subreddit-display:openai");
+  });
+
   it.each([
     ["facebook", "https://www.facebook.com"],
     ["instagram", "https://instagram.com"],
@@ -210,6 +322,39 @@ describe("SitePolicyStore", () => {
     await vi.waitFor(() => expect(listener).toHaveBeenCalledWith("protected"));
     onChange({ [policyKey(origin)]: { newValue: "trusted" } }, "local");
     await vi.waitFor(() => expect(listener).toHaveBeenCalledTimes(2));
+  });
+
+  it("watches a subreddit override and its inherited Reddit-wide policy", async () => {
+    const url = "https://www.reddit.com/r/OpenAI/comments/abc123/story";
+    const origin = "https://www.reddit.com";
+    const subredditKey = subredditPolicyKey("openai");
+    const platformKey = socialPolicyKey("reddit");
+    const values: Record<string, unknown> = { [platformKey]: "protected" };
+    let onChange!: (changes: Record<string, { newValue?: unknown }>, areaName: string) => void;
+    const area = {
+      get: vi.fn(async (keys: string[]) => Object.fromEntries(keys.map((key) => [key, values[key]]))),
+      set: vi.fn(),
+    };
+    const changes = {
+      addListener: vi.fn((listener) => { onChange = listener; }),
+      removeListener: vi.fn(),
+    };
+    const listener = vi.fn();
+    const dispose = new SitePolicyStore(area, changes).watch(url, listener);
+
+    values[subredditKey] = "trusted";
+    onChange({ [subredditKey]: { newValue: "trusted" } }, "local");
+    await vi.waitFor(() => expect(listener).toHaveBeenLastCalledWith("trusted"));
+
+    delete values[subredditKey];
+    values[platformKey] = "trusted";
+    onChange({ [platformKey]: { newValue: "trusted" } }, "local");
+    await vi.waitFor(() => expect(listener).toHaveBeenCalledTimes(2));
+
+    onChange({ [policyKey(origin)]: { newValue: "protected" } }, "sync");
+    expect(listener).toHaveBeenCalledTimes(2);
+    dispose();
+    expect(changes.removeListener).toHaveBeenCalledWith(onChange);
   });
 });
 

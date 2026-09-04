@@ -290,7 +290,7 @@ test("Always show reveals current and future ordinary media and persists the exa
   }
 });
 
-test("keeps contextual controls usable on an Amazon-sized portrait image", async () => {
+test("keeps compact reveal controls usable without crowding an Amazon-sized portrait", async () => {
   const extension = await launchExtension({ seedFixturePolicy: false });
   const { page, worker } = extension;
   try {
@@ -306,33 +306,33 @@ test("keeps contextual controls usable on an Amazon-sized portrait image", async
     });
 
     const portrait = page.locator("#amazon-portrait");
-    const alwaysFrost = page.getByRole("button", { name: "Always frost images here" }).first();
-    await alwaysFrost.focus();
-    await expect(alwaysFrost).toBeVisible();
-    const [portraitBox, frostActionBox] = await Promise.all([
-      portrait.boundingBox(),
-      alwaysFrost.boundingBox(),
-    ]);
+    const portraitBox = await portrait.boundingBox();
     expect(portraitBox).not.toBeNull();
-    expect(frostActionBox).not.toBeNull();
-    expect(frostActionBox!.x).toBeGreaterThanOrEqual(portraitBox!.x);
-    expect(frostActionBox!.x + frostActionBox!.width)
-      .toBeLessThanOrEqual(portraitBox!.x + portraitBox!.width);
+    const frostActions = page.getByRole("button", { name: "Always frost images here" });
+    for (let index = 0; index < await frostActions.count(); index += 1) {
+      const actionBox = await frostActions.nth(index).boundingBox();
+      expect(actionBox).not.toBeNull();
+      const overlapsPortrait =
+        actionBox!.x < portraitBox!.x + portraitBox!.width &&
+        actionBox!.x + actionBox!.width > portraitBox!.x &&
+        actionBox!.y < portraitBox!.y + portraitBox!.height &&
+        actionBox!.y + actionBox!.height > portraitBox!.y;
+      expect(overlapsPortrait).toBe(false);
+    }
 
-    await alwaysFrost.click();
+    await worker.evaluate(({ key }) => chrome.storage.local.set({ [key]: "protected" }), {
+      key: `site-policy:${fixtureOrigin}`,
+    });
     await expect(portrait).toHaveAttribute("data-eclipse-goggles-protected", "image");
     await revealThisWithText(page, "Amazon portrait product image").click();
 
-    const alwaysShow = page.getByRole("button", { name: "Always show images here" });
     const frostAgain = page.getByRole("button", { name: "Frost again", exact: true }).first();
-    const [showBox, reprotectBox] = await Promise.all([
-      alwaysShow.boundingBox(),
-      frostAgain.boundingBox(),
-    ]);
-    expect(showBox).not.toBeNull();
+    await expect(page.getByRole("button", { name: "Always show images here" })).toHaveCount(0);
+    const reprotectBox = await frostAgain.boundingBox();
     expect(reprotectBox).not.toBeNull();
-    expect(showBox!.x).toBeGreaterThanOrEqual(portraitBox!.x);
-    expect(showBox!.x + showBox!.width).toBeLessThanOrEqual(reprotectBox!.x - 8);
+    expect(reprotectBox!.x).toBeGreaterThanOrEqual(portraitBox!.x);
+    expect(reprotectBox!.x + reprotectBox!.width)
+      .toBeLessThanOrEqual(portraitBox!.x + portraitBox!.width);
   } finally {
     await closeExtension(extension);
   }
@@ -360,6 +360,9 @@ test("defaults Reddit protected and keeps blocked subjects frosted when Reddit i
       "data-eclipse-goggles-protected",
       "image",
     );
+    await revealThisWithText(page, "A calm lake beneath wooded hills").click();
+    await expect(page.getByRole("button", { name: "Frost again", exact: true })).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "Always show images here" })).toHaveCount(0);
 
     await worker.evaluate(() => chrome.storage.local.set({ "social-policy:reddit": "trusted" }));
     await expect(page.locator("#ordinary")).not.toHaveAttribute(

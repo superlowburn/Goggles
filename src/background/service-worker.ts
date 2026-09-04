@@ -1,11 +1,16 @@
 import type { ExtensionMessage, PolicyContext } from "../shared/media-types";
 import {
   isSiteMode,
+  isCanonicalSubredditName,
+  isSubredditDisplayNameForCanonical,
   normalizeOrigin,
+  parseRedditCommunity,
   prepareSocialPolicies,
   SitePolicyStore,
   socialPlatforms,
   socialPolicyKey,
+  subredditDisplayKey,
+  subredditPolicyKey,
   type SocialPlatformId,
 } from "../shared/site-policy";
 import { BlockedSubjectsStore } from "../shared/blocked-subjects";
@@ -13,6 +18,7 @@ import { BlockedSubjectsStore } from "../shared/blocked-subjects";
 type StorageArea = {
   get(key: null | string | string[]): Promise<Record<string, unknown>>;
   set(items: Record<string, unknown>): Promise<void>;
+  remove?(key: string | string[]): Promise<void>;
 };
 
 type Tab = { id?: number | undefined; url?: string | undefined };
@@ -35,12 +41,24 @@ interface FirstRunRuntime {
 }
 
 type WorkerResponse = PolicyContext | { opened: true } | {
-  error: "unsupported-page" | "invalid-message" | "origin-changed";
+  error: "unsupported-page" | "invalid-message" | "origin-changed" | "subreddit-changed";
 } | { socialPolicies: Record<SocialPlatformId, "protected" | "trusted"> }
-  | { platform: SocialPlatformId; mode: "protected" | "trusted" };
+  | { platform: SocialPlatformId; mode: "protected" | "trusted" }
+  | {
+    subredditPolicies: Array<{
+      canonicalName: string;
+      displayName: string;
+      mode: "protected" | "trusted";
+    }>;
+  }
+  | { canonicalName: string; removed: true };
 
 function isSocialPlatformId(value: unknown): value is SocialPlatformId {
   return typeof value === "string" && socialPlatforms.some(({ id }) => id === value);
+}
+
+function isTabId(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
 
 function isOptionsSender(sender: MessageSender, extensionId: string): boolean {
@@ -62,15 +80,16 @@ function isExtensionMessage(message: unknown): message is ExtensionMessage {
   switch (message.type) {
     case "policy:get-current":
     case "policy:get-social":
+    case "policy:list-subreddits":
       return true;
     case "options:open":
       return true;
     case "policy:get-tab":
-      return "tabId" in message && typeof message.tabId === "number";
+      return "tabId" in message && isTabId(message.tabId);
     case "policy:set-tab":
       return (
         "tabId" in message &&
-        typeof message.tabId === "number" &&
+        isTabId(message.tabId) &&
         "mode" in message &&
         isSiteMode(message.mode) &&
         "expectedOrigin" in message &&
@@ -83,6 +102,24 @@ function isExtensionMessage(message: unknown): message is ExtensionMessage {
         "mode" in message &&
         (message.mode === "protected" || message.mode === "trusted")
       );
+    case "policy:set-subreddit":
+      return (
+        "tabId" in message &&
+        isTabId(message.tabId) &&
+        "expectedSubreddit" in message &&
+        isCanonicalSubredditName(message.expectedSubreddit) &&
+        "mode" in message &&
+        (message.mode === "protected" || message.mode === "trusted")
+      );
+    case "policy:reset-subreddit":
+      return (
+        "tabId" in message &&
+        isTabId(message.tabId) &&
+        "expectedSubreddit" in message &&
+        isCanonicalSubredditName(message.expectedSubreddit)
+      );
+    case "policy:reset-subreddit-setting":
+      return "canonicalName" in message && isCanonicalSubredditName(message.canonicalName);
     default:
       return false;
   }
@@ -100,9 +137,11 @@ async function contextFor(
   const origin = originFor(tab);
   if (!origin) return { error: "unsupported-page" };
 
+  const policy = await store.resolve(tab?.url ?? origin);
+
   return {
     origin,
-    mode: await store.get(origin),
+    ...policy,
     blockedSubjects: await blockedSubjectsStore.get(),
   };
 }
@@ -114,7 +153,12 @@ export async function handleExtensionMessage(
 ): Promise<WorkerResponse> {
   if (!isExtensionMessage(message)) return { error: "invalid-message" };
   if (
-    (message.type === "policy:get-social" || message.type === "policy:set-social") &&
+    (
+      message.type === "policy:get-social" ||
+      message.type === "policy:set-social" ||
+      message.type === "policy:list-subreddits" ||
+      message.type === "policy:reset-subreddit-setting"
+    ) &&
     !isOptionsSender(sender, deps.extensionId ?? chrome.runtime.id)
   ) {
     return { error: "invalid-message" };
@@ -144,6 +188,38 @@ export async function handleExtensionMessage(
     case "policy:set-social":
       await deps.storage.set({ [socialPolicyKey(message.platform)]: message.mode });
       return { platform: message.platform, mode: message.mode };
+    case "policy:list-subreddits": {
+      const prefix = subredditPolicyKey("");
+      const values = await deps.storage.get(null);
+      const subredditPolicies = Object.entries(values).flatMap(([
+        key,
+        value,
+      ]): Array<{
+        canonicalName: string;
+        displayName: string;
+        mode: "protected" | "trusted";
+      }> => {
+        const canonicalName = key.startsWith(prefix) ? key.slice(prefix.length) : "";
+        const displayName = values[subredditDisplayKey(canonicalName)];
+        return isCanonicalSubredditName(canonicalName) &&
+          (value === "protected" || value === "trusted")
+          ? [{
+            canonicalName,
+            displayName: isSubredditDisplayNameForCanonical(displayName, canonicalName)
+              ? displayName
+              : canonicalName,
+            mode: value,
+          }]
+          : [];
+      }).sort((first, second) => first.canonicalName.localeCompare(second.canonicalName));
+      return { subredditPolicies };
+    }
+    case "policy:reset-subreddit-setting":
+      await deps.storage.remove?.([
+        subredditPolicyKey(message.canonicalName),
+        subredditDisplayKey(message.canonicalName),
+      ]);
+      return { canonicalName: message.canonicalName, removed: true };
     case "policy:get-tab":
       return contextFor(await deps.tabs.get(message.tabId), store, blockedSubjectsStore);
     case "policy:set-tab": {
@@ -153,6 +229,21 @@ export async function handleExtensionMessage(
 
       await store.set(origin, message.mode);
       return { origin, mode: message.mode === "strict" ? "protected" : message.mode };
+    }
+    case "policy:set-subreddit":
+    case "policy:reset-subreddit": {
+      const tab = await deps.tabs.get(message.tabId);
+      const community = tab.url ? parseRedditCommunity(tab.url) : null;
+      if (community?.canonicalName !== message.expectedSubreddit) {
+        return { error: "subreddit-changed" };
+      }
+
+      if (message.type === "policy:set-subreddit") {
+        await store.setSubreddit(community.canonicalName, message.mode, community.displayName);
+      } else {
+        await store.resetSubreddit(community.canonicalName);
+      }
+      return contextFor(tab, store, blockedSubjectsStore);
     }
   }
 }

@@ -1,4 +1,10 @@
-import { defaultPolicyForOrigin, isSiteMode, SitePolicyStore } from "../shared/site-policy";
+import {
+  defaultPolicyForOrigin,
+  isSiteMode,
+  parseRedditCommunity,
+  SitePolicyStore,
+  socialPlatformForOrigin,
+} from "../shared/site-policy";
 import type { ExtensionMessage, PolicyContext, SiteMode } from "../shared/media-types";
 import { supportedProviderUrl } from "../media/provider-frames";
 import { ContentController } from "./content-controller";
@@ -31,6 +37,7 @@ export interface ContentBootstrapDependencies {
   watchPolicy: (origin: string, listener: (mode: SiteMode) => void) => () => void;
   watchBlockedSubjects: (listener: (config: BlockedSubjectsConfig) => void) => () => void;
   addPageHideListener: (listener: () => void) => void;
+  addNavigationListener: (listener: (href: string) => void) => () => void;
 }
 
 export async function bootstrapContentScript(
@@ -43,14 +50,87 @@ export async function bootstrapContentScript(
   const controller = dependencies.createController();
   let stopWatching: (() => void) | null = null;
   let stopWatchingBlockedSubjects: (() => void) | null = null;
+  let stopWatchingNavigation: (() => void) | null = null;
+  let activePolicyScope: string | null = null;
+  let latestHref = dependencies.href;
+  let policyGeneration = 0;
+  let navigationGeneration = 0;
+  let started = false;
   let disposed = false;
+  let pendingPolicyScope: string | null = null;
 
   dependencies.addPageHideListener(() => {
     disposed = true;
+    policyGeneration += 1;
+    navigationGeneration += 1;
     stopWatching?.();
     stopWatchingBlockedSubjects?.();
+    stopWatchingNavigation?.();
     controller.stop();
   });
+
+  const startDestinationPolicy = (
+    policyScope: string,
+    requestGeneration: number,
+  ): void => {
+    if (
+      disposed ||
+      requestGeneration !== navigationGeneration ||
+      latestHref !== policyScope
+    ) return;
+
+    let currentMode = defaultPolicyForOrigin(policyScope);
+    let policyUpdates = 0;
+    controller.applyMode(currentMode);
+    stopWatching?.();
+    activePolicyScope = policyScope;
+    const watcherGeneration = ++policyGeneration;
+    stopWatching = dependencies.watchPolicy(policyScope, (nextMode) => {
+      if (
+        disposed ||
+        watcherGeneration !== policyGeneration ||
+        activePolicyScope !== policyScope ||
+        latestHref !== policyScope
+      ) return;
+      policyUpdates += 1;
+      if (nextMode === currentMode) return;
+      currentMode = nextMode;
+      controller.applyMode(nextMode);
+    });
+
+    void dependencies.sendMessage({ type: "policy:get-current" })
+      .then((response) => {
+        const currentPage = parseUrl(policyScope);
+        if (
+          disposed ||
+          requestGeneration !== navigationGeneration ||
+          watcherGeneration !== policyGeneration ||
+          latestHref !== policyScope ||
+          policyUpdates > 0 ||
+          !currentPage ||
+          !isPolicyContext(response) ||
+          response.origin !== currentPage.origin ||
+          !policyMatchesRedditScope(response, policyScope) ||
+          response.mode === currentMode
+        ) return;
+        currentMode = response.mode;
+        controller.applyMode(response.mode);
+      })
+      .catch(() => undefined);
+  };
+
+  if (!dependencies.isChildFrame && socialPlatformForOrigin(page.origin)?.id === "reddit") {
+    stopWatchingNavigation = dependencies.addNavigationListener((policyScope) => {
+      latestHref = policyScope;
+      if (started && policyScope === activePolicyScope) return;
+      const requestGeneration = ++navigationGeneration;
+      if (!started) {
+        pendingPolicyScope = policyScope;
+        return;
+      }
+      startDestinationPolicy(policyScope, requestGeneration);
+    });
+  }
 
   try {
     const response = await dependencies.sendMessage({ type: "policy:get-current" });
@@ -59,8 +139,18 @@ export async function bootstrapContentScript(
 
     let currentMode = response.mode;
     let policyUpdates = 0;
-    let started = false;
-    stopWatching = dependencies.watchPolicy(response.origin, (mode) => {
+    const policyScope = !dependencies.isChildFrame &&
+        socialPlatformForOrigin(response.origin)?.id === "reddit"
+      ? dependencies.href
+      : response.origin;
+    const watcherGeneration = ++policyGeneration;
+    activePolicyScope = policyScope;
+    stopWatching = dependencies.watchPolicy(policyScope, (mode) => {
+      if (
+        disposed ||
+        watcherGeneration !== policyGeneration ||
+        (policyScope !== response.origin && latestHref !== policyScope)
+      ) return;
       policyUpdates += 1;
       currentMode = mode;
       if (started) controller.applyMode(mode);
@@ -90,7 +180,7 @@ export async function bootstrapContentScript(
     if (disposed) return;
     controller.start({
       ...response,
-      mode: currentMode,
+      mode: pendingPolicyScope ? defaultPolicyForOrigin(pendingPolicyScope) : currentMode,
       descriptionsVisible,
       ...(currentBlockedSubjects && hasEnabledBlockedSubjects(currentBlockedSubjects)
         ? { blockedSubjects: currentBlockedSubjects }
@@ -101,8 +191,18 @@ export async function bootstrapContentScript(
     if (disposed) return;
     const origin = fallbackOrigin(page, dependencies);
     let mode = defaultPolicyForOrigin(origin);
-    let started = false;
-    stopWatching = dependencies.watchPolicy(origin, (nextMode) => {
+    const policyScope = !dependencies.isChildFrame &&
+        socialPlatformForOrigin(origin)?.id === "reddit"
+      ? dependencies.href
+      : origin;
+    const watcherGeneration = ++policyGeneration;
+    activePolicyScope = policyScope;
+    stopWatching = dependencies.watchPolicy(policyScope, (nextMode) => {
+      if (
+        disposed ||
+        watcherGeneration !== policyGeneration ||
+        (policyScope !== origin && latestHref !== policyScope)
+      ) return;
       mode = nextMode;
       if (started) controller.applyMode(nextMode);
     });
@@ -122,6 +222,18 @@ export async function bootstrapContentScript(
     });
     started = true;
   }
+
+  if (pendingPolicyScope) {
+    startDestinationPolicy(pendingPolicyScope, navigationGeneration);
+    pendingPolicyScope = null;
+  }
+}
+
+function policyMatchesRedditScope(response: PolicyContext, href: string): boolean {
+  const community = parseRedditCommunity(href);
+  return community
+    ? response.reddit?.canonicalName === community.canonicalName
+    : response.reddit === undefined;
 }
 
 function productionDependencies(): ContentBootstrapDependencies {
@@ -154,7 +266,17 @@ function productionDependencies(): ContentBootstrapDependencies {
     addPageHideListener: (listener) => {
       window.addEventListener("pagehide", listener, { once: true });
     },
+    addNavigationListener: (listener) => addSameDocumentNavigationListener(listener),
   };
+}
+
+export function addSameDocumentNavigationListener(listener: (href: string) => void): () => void {
+  const navigation = (window as Window & { navigation?: EventTarget }).navigation;
+  const target: EventTarget = navigation ?? window;
+  const eventName = navigation ? "currententrychange" : "popstate";
+  const onNavigation = () => listener(window.location.href);
+  target.addEventListener(eventName, onNavigation);
+  return () => target.removeEventListener(eventName, onNavigation);
 }
 
 function parseUrl(href: string): URL | null {

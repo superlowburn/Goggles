@@ -5,10 +5,16 @@ import {
   type DocumentObserverPort,
 } from "../../src/content/content-controller";
 import {
+  addSameDocumentNavigationListener,
   bootstrapContentScript,
   type ContentBootstrapDependencies,
 } from "../../src/content/index";
-import type { MediaCandidate, MediaKind, SiteMode } from "../../src/shared/media-types";
+import type {
+  MediaCandidate,
+  MediaKind,
+  PolicyContext,
+  SiteMode,
+} from "../../src/shared/media-types";
 import type {
   ProtectionHandle,
   ProtectionOptions,
@@ -150,7 +156,7 @@ describe("ContentController", () => {
     expect(setSiteMode).toHaveBeenCalledWith("https://news.example", "protected");
   });
 
-  it("offers a frost action on an Amazon-sized portrait product image", () => {
+  it("does not offer a frost action on a compact portrait product image", () => {
     const image = document.createElement("img");
     vi.spyOn(image, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 163, 200));
     document.body.append(image);
@@ -162,7 +168,7 @@ describe("ContentController", () => {
     harness.controller.start({ origin: "https://www.amazon.ca", mode: "trusted" });
     harness.observer.emit([image]);
 
-    expect(harness.renderer.activeFor(image)[0]?.options.siteControl?.mode).toBe("protected");
+    expect(harness.renderer.activeFor(image)).toHaveLength(0);
   });
 
   it("does not add Always frost controls to a social platform switched Off", () => {
@@ -177,6 +183,25 @@ describe("ContentController", () => {
     harness.observer.emit([image]);
 
     expect(harness.renderer.protect).not.toHaveBeenCalled();
+  });
+
+  it("keeps Reddit's protected media controls scoped to the item", () => {
+    const image = document.createElement("img");
+    document.body.append(image);
+    const harness = controllerHarness(new Map([[image, candidate(image, "image")]]), {
+      enableSiteControl: true,
+      setSiteMode: vi.fn(),
+    });
+
+    harness.controller.start({ origin: "https://www.reddit.com", mode: "protected" });
+    harness.observer.emit([image]);
+
+    const item = harness.renderer.activeFor(image)[0];
+    expect(item?.options.siteControl).toBeUndefined();
+    item?.handle.reveal();
+    expect(item?.handle.isRevealed()).toBe(true);
+    item?.handle.reprotect();
+    expect(item?.handle.isRevealed()).toBe(false);
   });
 
   it("does not create a trusted-page control root below 96x96", () => {
@@ -805,6 +830,7 @@ function bootstrapHarness(
   sendMessage: ReturnType<typeof vi.fn>;
   watchPolicy: ReturnType<typeof vi.fn>;
   addPageHideListener: ReturnType<typeof vi.fn>;
+  addNavigationListener: ReturnType<typeof vi.fn>;
 } {
   const controller = {
     start: vi.fn(),
@@ -821,7 +847,8 @@ function bootstrapHarness(
   const getBlockedSubjects = vi.fn().mockResolvedValue({ enabled: false, keywords: [] });
   const watchBlockedSubjects = vi.fn(() => vi.fn());
   const addPageHideListener = vi.fn();
-  const dependencies: ContentBootstrapDependencies = {
+  const addNavigationListener = vi.fn(() => vi.fn());
+  const dependencies = {
     href: "https://child.example/story",
     isChildFrame: false,
     parentLocation: () => null,
@@ -832,12 +859,71 @@ function bootstrapHarness(
     watchPolicy,
     watchBlockedSubjects,
     addPageHideListener,
+    addNavigationListener,
     ...overrides,
   };
-  return { dependencies, controller, sendMessage, watchPolicy, addPageHideListener };
+  return {
+    dependencies,
+    controller,
+    sendMessage,
+    watchPolicy,
+    addPageHideListener,
+    addNavigationListener,
+  };
+}
+
+function redditPolicy(mode: SiteMode, displayName?: string): PolicyContext {
+  return {
+    origin: "https://www.reddit.com",
+    mode,
+    ...(displayName
+      ? {
+        reddit: {
+          displayName,
+          canonicalName: displayName.toLowerCase(),
+          inheritedMode: "protected" as const,
+          hasOverride: mode === "trusted",
+        },
+      }
+      : {}),
+  };
 }
 
 describe("content-script bootstrap", () => {
+  it("uses popstate as the same-document navigation fallback", () => {
+    const listener = vi.fn();
+    const stop = addSameDocumentNavigationListener(listener);
+
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    stop();
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses currententrychange when the Navigation API is available", () => {
+    const navigation = new EventTarget();
+    Object.defineProperty(window, "navigation", { configurable: true, value: navigation });
+    const listener = vi.fn();
+    const originalUrl = window.location.href;
+
+    try {
+      const stop = addSameDocumentNavigationListener(listener);
+      window.history.pushState({}, "", "/r/typescript/");
+      navigation.dispatchEvent(new Event("currententrychange"));
+      window.dispatchEvent(new PopStateEvent("popstate"));
+      expect(listener).toHaveBeenCalledWith(window.location.href);
+
+      stop();
+      navigation.dispatchEvent(new Event("currententrychange"));
+      expect(listener).toHaveBeenCalledTimes(1);
+    } finally {
+      window.history.replaceState({}, "", originalUrl);
+      Reflect.deleteProperty(window, "navigation");
+    }
+  });
+
   it("falls back to Trusted on non-social sites when policy messaging rejects", async () => {
     const harness = bootstrapHarness({
       sendMessage: vi.fn().mockRejectedValue(new Error("storage unavailable")),
@@ -924,7 +1010,7 @@ describe("content-script bootstrap", () => {
     expect(renderer.activeFor(image)[0]?.options.siteControl?.mode).toBe("trusted");
   });
 
-  it("keeps configured subject matches frosted after fallback Always show", async () => {
+  it("keeps configured subject matches frosted after a Reddit fallback reveal", async () => {
     const subject = document.createElement("img");
     subject.alt = "Donald Trump at an event";
     const ordinary = document.createElement("img");
@@ -967,13 +1053,13 @@ describe("content-script bootstrap", () => {
     observer.emit([subject, ordinary]);
     const ordinaryLayer = renderer.debugLayerFor(ordinary)!;
     ordinaryLayer.querySelector<HTMLButtonElement>(".eg-reveal-surface")!.click();
-    ordinaryLayer.querySelector<HTMLButtonElement>(".eg-site-action")!.click();
-    await vi.waitFor(() => expect(setSiteMode).toHaveBeenCalledWith("https://old.reddit.com", "trusted"));
 
     expect(subjectListener).toBeTypeOf("function");
     expect(renderer.debugLayerFor(subject)?.querySelector(".eg-reveal-surface")).not.toBeNull();
     expect(subject.getAttribute("data-eclipse-goggles-protected")).toBe("image");
-    expect(renderer.debugLayerFor(ordinary)).toBeNull();
+    expect(ordinary.getAttribute("data-eclipse-goggles-protected")).toBeNull();
+    expect(ordinaryLayer.querySelector(".eg-site-action")).toBeNull();
+    expect(ordinaryLayer.querySelector(".eg-reprotect")).not.toBeNull();
   });
 
   it("starts the returned policy and watches only its exact top origin", async () => {
@@ -996,6 +1082,433 @@ describe("content-script bootstrap", () => {
       | undefined;
     listener?.("trusted");
     expect(harness.controller.applyMode).toHaveBeenCalledWith("trusted");
+  });
+
+  it("watches the full URL for a top-frame Reddit subreddit policy", async () => {
+    const href = "https://www.reddit.com/r/OpenAI/comments/abc/example";
+    const harness = bootstrapHarness({
+      href,
+      sendMessage: vi.fn().mockResolvedValue({
+        origin: "https://www.reddit.com",
+        mode: "trusted",
+        reddit: {
+          displayName: "OpenAI",
+          canonicalName: "openai",
+          inheritedMode: "protected",
+          hasOverride: true,
+        },
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+
+    expect(harness.watchPolicy).toHaveBeenCalledWith(href, expect.any(Function));
+  });
+
+  it("applies a Reddit navigation that wins the initial pending policy lookup", async () => {
+    const openAiUrl = "https://www.reddit.com/r/OpenAI/";
+    const typescriptUrl = "https://www.reddit.com/r/typescript/";
+    let onNavigate: ((href: string) => void) | undefined;
+    let resolveOpenAi!: (value: unknown) => void;
+    const openAiPolicy = new Promise<unknown>((resolve) => {
+      resolveOpenAi = resolve;
+    });
+    const sendMessage = vi.fn()
+      .mockImplementationOnce(() => openAiPolicy)
+      .mockResolvedValue(redditPolicy("trusted", "typescript"));
+    const harness = bootstrapHarness({
+      href: openAiUrl,
+      sendMessage,
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return vi.fn();
+      }),
+    });
+
+    const bootstrapping = bootstrapContentScript(harness.dependencies);
+    await vi.waitFor(() => expect(onNavigate).toBeTypeOf("function"));
+    onNavigate?.(typescriptUrl);
+    resolveOpenAi(redditPolicy("protected", "OpenAI"));
+    await bootstrapping;
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(3));
+
+    expect(harness.controller.start).toHaveBeenCalledTimes(1);
+    expect(harness.controller.applyMode).toHaveBeenCalledWith("trusted");
+    expect(harness.watchPolicy).toHaveBeenLastCalledWith(typescriptUrl, expect.any(Function));
+  });
+
+  it("rebinds and applies the destination policy after Reddit same-document navigation", async () => {
+    const openAiUrl = "https://www.reddit.com/r/OpenAI/comments/abc/example";
+    const typescriptUrl = "https://www.reddit.com/r/typescript/";
+    let href = openAiUrl;
+    let onNavigate: ((href: string) => void) | undefined;
+    const stopOpenAi = vi.fn();
+    const stopTypescript = vi.fn();
+    const sendMessage = vi.fn(async () => href === openAiUrl
+      ? redditPolicy("protected", "OpenAI")
+      : redditPolicy("trusted", "typescript"));
+    const harness = bootstrapHarness({
+      href,
+      sendMessage,
+      watchPolicy: vi.fn((scope) => scope === openAiUrl ? stopOpenAi : stopTypescript),
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return vi.fn();
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    href = typescriptUrl;
+    harness.dependencies.href = typescriptUrl;
+    onNavigate?.(typescriptUrl);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(3));
+
+    expect(stopOpenAi).toHaveBeenCalledTimes(1);
+    expect(harness.dependencies.watchPolicy).toHaveBeenLastCalledWith(
+      typescriptUrl,
+      expect.any(Function),
+    );
+    expect(harness.controller.applyMode).toHaveBeenCalledWith("trusted");
+  });
+
+  it("keeps the safe destination mode when confirmation names the wrong subreddit", async () => {
+    const openAiUrl = "https://www.reddit.com/r/OpenAI/";
+    const typescriptUrl = "https://www.reddit.com/r/typescript/";
+    let onNavigate: ((href: string) => void) | undefined;
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("trusted", "javascript"));
+    const harness = bootstrapHarness({
+      href: openAiUrl,
+      sendMessage,
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return vi.fn();
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    onNavigate?.(typescriptUrl);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(3));
+
+    expect(harness.controller.applyMode.mock.calls.map(([mode]) => mode)).toEqual(["protected"]);
+    expect(harness.watchPolicy).toHaveBeenLastCalledWith(typescriptUrl, expect.any(Function));
+  });
+
+  it("keeps the safe home mode when confirmation still has subreddit context", async () => {
+    const openAiUrl = "https://www.reddit.com/r/OpenAI/";
+    const homeUrl = "https://www.reddit.com/";
+    let onNavigate: ((href: string) => void) | undefined;
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"));
+    const harness = bootstrapHarness({
+      href: openAiUrl,
+      sendMessage,
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return vi.fn();
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    onNavigate?.(homeUrl);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(3));
+
+    expect(harness.controller.applyMode.mock.calls.map(([mode]) => mode)).toEqual(["protected"]);
+    expect(harness.watchPolicy).toHaveBeenLastCalledWith(homeUrl, expect.any(Function));
+  });
+
+  it.each([
+    ["rejected", () => Promise.reject(new Error("worker unavailable"))],
+    ["malformed", () => Promise.resolve({ error: "unsupported-page" })],
+  ])("falls back to Protected when a Reddit destination policy is %s", async (_case, response) => {
+    const openAiUrl = "https://www.reddit.com/r/OpenAI/";
+    const typescriptUrl = "https://www.reddit.com/r/typescript/";
+    let onNavigate: ((href: string) => void) | undefined;
+    const stopOpenAi = vi.fn();
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"))
+      .mockImplementationOnce(response);
+    const harness = bootstrapHarness({
+      href: openAiUrl,
+      sendMessage,
+      watchPolicy: vi.fn((scope) => scope === openAiUrl ? stopOpenAi : vi.fn()),
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return vi.fn();
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    onNavigate?.(typescriptUrl);
+    await vi.waitFor(() => {
+      expect(harness.controller.applyMode).toHaveBeenCalledWith("protected");
+    });
+
+    expect(stopOpenAi).toHaveBeenCalledTimes(1);
+    expect(harness.dependencies.watchPolicy).toHaveBeenLastCalledWith(
+      typescriptUrl,
+      expect.any(Function),
+    );
+  });
+
+  it("rebinds from a subreddit to Reddit home without reloading", async () => {
+    const subredditUrl = "https://www.reddit.com/r/OpenAI/";
+    const homeUrl = "https://www.reddit.com/";
+    let href = subredditUrl;
+    let onNavigate: ((href: string) => void) | undefined;
+    const sendMessage = vi.fn(async () => href === subredditUrl
+      ? redditPolicy("trusted", "OpenAI")
+      : redditPolicy("protected"));
+    const harness = bootstrapHarness({
+      href,
+      sendMessage,
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return vi.fn();
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    href = homeUrl;
+    harness.dependencies.href = href;
+    onNavigate?.(homeUrl);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(3));
+
+    expect(harness.watchPolicy).toHaveBeenLastCalledWith(homeUrl, expect.any(Function));
+    expect(harness.controller.applyMode).toHaveBeenCalledWith("protected");
+    expect(harness.controller.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("protects dynamic destination media while its Reddit policy lookup is pending", async () => {
+    const image = document.createElement("img");
+    const observer = new FakeDocumentObserver();
+    const renderer = rendererHarness();
+    const controller = new ContentController({
+      document,
+      observer,
+      renderer,
+      classify: (element) => element === image ? candidate(image, "image") : null,
+      resolveDescription: () => "A future Reddit image",
+    });
+    let onNavigate: ((href: string) => void) | undefined;
+    let resolveDestination!: (value: unknown) => void;
+    const destinationPolicy = new Promise<unknown>((resolve) => {
+      resolveDestination = resolve;
+    });
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"))
+      .mockImplementationOnce(() => destinationPolicy);
+    const harness = bootstrapHarness({
+      href: "https://www.reddit.com/r/OpenAI/",
+      sendMessage,
+      createController: () => controller,
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return vi.fn();
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    onNavigate?.("https://www.reddit.com/r/typescript/");
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(3));
+    document.body.append(image);
+    observer.emit([image]);
+
+    expect(renderer.activeFor(image)).toHaveLength(1);
+    expect(renderer.activeFor(image)[0]?.options.mode).toBe("protected");
+    resolveDestination(redditPolicy("protected", "typescript"));
+    await Promise.resolve();
+  });
+
+  it("keeps a destination watcher update that arrives before policy confirmation", async () => {
+    const openAiUrl = "https://www.reddit.com/r/OpenAI/";
+    const typescriptUrl = "https://www.reddit.com/r/typescript/";
+    let onNavigate: ((href: string) => void) | undefined;
+    let destinationListener: ((mode: SiteMode) => void) | undefined;
+    let resolveDestination!: (value: unknown) => void;
+    const destinationPolicy = new Promise<unknown>((resolve) => {
+      resolveDestination = resolve;
+    });
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"))
+      .mockImplementationOnce(() => destinationPolicy);
+    const harness = bootstrapHarness({
+      href: openAiUrl,
+      sendMessage,
+      watchPolicy: vi.fn((scope, listener) => {
+        if (scope === typescriptUrl) destinationListener = listener;
+        return vi.fn();
+      }),
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return vi.fn();
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    onNavigate?.(typescriptUrl);
+    await vi.waitFor(() => expect(destinationListener).toBeTypeOf("function"));
+    destinationListener?.("trusted");
+    resolveDestination(redditPolicy("protected", "typescript"));
+    await Promise.resolve();
+
+    expect(harness.controller.applyMode.mock.calls.map(([mode]) => mode)).toEqual([
+      "protected",
+      "trusted",
+    ]);
+  });
+
+  it("keeps the active watcher live when Back wins a pending Reddit policy lookup", async () => {
+    const openAiUrl = "https://www.reddit.com/r/OpenAI/";
+    const typescriptUrl = "https://www.reddit.com/r/typescript/";
+    let href = openAiUrl;
+    let onNavigate: ((href: string) => void) | undefined;
+    let openAiPolicyListener: ((mode: SiteMode) => void) | undefined;
+    let resolveTypescript!: (value: unknown) => void;
+    const typescriptPolicy = new Promise<unknown>((resolve) => {
+      resolveTypescript = resolve;
+    });
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce(redditPolicy("protected", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("protected", "OpenAI"))
+      .mockImplementationOnce(() => typescriptPolicy)
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"));
+    const harness = bootstrapHarness({
+      href,
+      sendMessage,
+      watchPolicy: vi.fn((scope, listener) => {
+        if (scope === openAiUrl) openAiPolicyListener = listener;
+        return vi.fn();
+      }),
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return vi.fn();
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    href = typescriptUrl;
+    harness.dependencies.href = href;
+    onNavigate?.(typescriptUrl);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(3));
+    openAiPolicyListener?.("trusted");
+    expect(harness.controller.applyMode).toHaveBeenCalledExactlyOnceWith("protected");
+
+    href = openAiUrl;
+    harness.dependencies.href = href;
+    onNavigate?.(openAiUrl);
+    openAiPolicyListener?.("trusted");
+    resolveTypescript(redditPolicy("trusted", "typescript"));
+    await Promise.resolve();
+
+    expect(harness.controller.applyMode.mock.calls.map(([mode]) => mode)).toEqual([
+      "protected",
+      "protected",
+      "trusted",
+    ]);
+    expect(harness.dependencies.watchPolicy).toHaveBeenCalledTimes(3);
+  });
+
+  it("reapplies Reddit policies across Back and Forward history navigation", async () => {
+    const openAiUrl = "https://www.reddit.com/r/OpenAI/";
+    const typescriptUrl = "https://www.reddit.com/r/typescript/";
+    let onNavigate: ((href: string) => void) | undefined;
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce(redditPolicy("protected", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("protected", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("trusted", "typescript"))
+      .mockResolvedValueOnce(redditPolicy("protected", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("trusted", "typescript"));
+    const harness = bootstrapHarness({
+      href: openAiUrl,
+      sendMessage,
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return vi.fn();
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    onNavigate?.(typescriptUrl);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(3));
+    onNavigate?.(openAiUrl);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(4));
+    onNavigate?.(typescriptUrl);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(5));
+
+    expect(harness.controller.applyMode.mock.calls.map(([mode]) => mode)).toEqual([
+      "protected",
+      "trusted",
+      "protected",
+      "protected",
+      "trusted",
+    ]);
+    expect(harness.watchPolicy.mock.calls.map(([scope]) => scope)).toEqual([
+      openAiUrl,
+      typescriptUrl,
+      openAiUrl,
+      typescriptUrl,
+    ]);
+  });
+
+  it("ignores a pending Reddit route response after disposal", async () => {
+    const openAiUrl = "https://www.reddit.com/r/OpenAI/";
+    const typescriptUrl = "https://www.reddit.com/r/typescript/";
+    let onNavigate: ((href: string) => void) | undefined;
+    let resolveTypescript!: (value: unknown) => void;
+    const typescriptPolicy = new Promise<unknown>((resolve) => {
+      resolveTypescript = resolve;
+    });
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce(redditPolicy("protected", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("protected", "OpenAI"))
+      .mockImplementationOnce(() => typescriptPolicy);
+    const stopNavigation = vi.fn();
+    const harness = bootstrapHarness({
+      href: openAiUrl,
+      sendMessage,
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return stopNavigation;
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    harness.dependencies.href = typescriptUrl;
+    onNavigate?.(typescriptUrl);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(3));
+    const onPageHide = harness.addPageHideListener.mock.calls[0]?.[0] as (() => void) | undefined;
+    onPageHide?.();
+    resolveTypescript(redditPolicy("trusted", "typescript"));
+    await Promise.resolve();
+
+    expect(stopNavigation).toHaveBeenCalledTimes(1);
+    expect(harness.controller.stop).toHaveBeenCalledTimes(1);
+    expect(harness.controller.applyMode).toHaveBeenCalledExactlyOnceWith("protected");
+    expect(harness.watchPolicy).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves Reddit child-frame policy behavior unchanged", async () => {
+    const harness = bootstrapHarness({
+      href: "https://www.reddit.com/r/OpenAI/",
+      isChildFrame: true,
+      sendMessage: vi.fn().mockResolvedValue(redditPolicy("trusted", "OpenAI")),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+
+    expect(harness.watchPolicy).toHaveBeenCalledWith(
+      "https://www.reddit.com",
+      expect.any(Function),
+    );
+    expect(harness.addNavigationListener).not.toHaveBeenCalled();
   });
 
   it("starts with a policy change received while preferences are still loading", async () => {

@@ -6,6 +6,8 @@ const undecoratedImageMinimum = 96;
 const videoMinimum = 96;
 const interactiveDescendant =
   "button, a, input, select, textarea, [role=button], [tabindex]";
+const redditAdvertisementContainer =
+  "shreddit-dynamic-ad-link, shreddit-ad-post, shreddit-post[is-promoted], shreddit-post[promoted]";
 
 export interface ClassificationEnvironment {
   box(element: Element): ClassificationBox;
@@ -15,11 +17,20 @@ export interface ClassificationEnvironment {
 type ClassificationBox = Pick<DOMRect, "width" | "height"> &
   Partial<Pick<DOMRect, "top" | "right" | "bottom" | "left">>;
 
+export function isRedditHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return normalized === "reddit.com" || normalized.endsWith(".reddit.com");
+}
+
 export function classifyElement(
   element: Element,
   env: ClassificationEnvironment,
 ): MediaCandidate | null {
   if (!(element instanceof HTMLElement)) return null;
+  if (
+    isRedditHost(element.ownerDocument.location.hostname) &&
+    element.closest(redditAdvertisementContainer)
+  ) return null;
 
   const { width, height } = env.box(element);
   if (width <= 0 || height <= 0) return null;

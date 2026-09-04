@@ -4,6 +4,11 @@ import { describe, expect, it } from "vitest";
 describe("extension manifest", () => {
   const manifest = JSON.parse(readFileSync("public/manifest.json", "utf8"));
 
+  it("requires a Chrome version with the Navigation API", () => {
+    expect(manifest.minimum_chrome_version).toBe("102");
+    expect(JSON.parse(readFileSync("manifest.json", "utf8")).minimum_chrome_version).toBe("102");
+  });
+
   it("loads the content script at document_start in every frame", () => {
     expect(manifest.manifest_version).toBe(3);
     expect(manifest.content_scripts).toEqual([

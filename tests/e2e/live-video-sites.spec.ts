@@ -111,7 +111,14 @@ test.describe("v0.2 live-site visual QA", () => {
         await (await alignedButton(page, image, "Frost again")).click();
         await expect(image).toHaveAttribute(protectedAttribute, "image");
         await (await alignedButton(page, image, /Reveal protected media:/u)).click();
-        await (await alignedButton(page, image, "Always show images here")).click();
+        if (site.slug === "reddit") {
+          await expect(page.getByRole("button", { name: "Always show images here" })).toHaveCount(0);
+          await worker.evaluate(() => chrome.storage.local.set({
+            "social-policy:reddit": "trusted",
+          }));
+        } else {
+          await (await alignedButton(page, image, "Always show images here")).click();
+        }
 
         await expect(image).not.toHaveAttribute(protectedAttribute, "image");
         await expect(video).not.toHaveAttribute(protectedAttribute, "video");

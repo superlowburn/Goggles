@@ -5,6 +5,8 @@ import {
   uniqueKeywords,
 } from "../shared/blocked-subjects";
 import {
+  isCanonicalSubredditName,
+  isSubredditDisplayNameForCanonical,
   normalizeOrigin,
   socialPlatformForOrigin,
   socialPlatforms,
@@ -12,6 +14,18 @@ import {
 } from "../shared/site-policy";
 
 const SAVE_ERROR = "Couldn't save. Try again.";
+
+function announceStatus(
+  element: HTMLElement | null,
+  message: string,
+  urgent = false,
+): void {
+  if (!element) return;
+  element.textContent = message;
+  element.setAttribute("aria-live", urgent ? "assertive" : "polite");
+  if (urgent) element.setAttribute("role", "alert");
+  else element.removeAttribute("role");
+}
 const socialLabels: Record<SocialPlatformId, string> = {
   facebook: "Facebook",
   instagram: "Instagram",
@@ -44,6 +58,12 @@ export async function mountOptions(
   if (!isSocialPoliciesResponse(socialResponse)) {
     throw new TypeError("Invalid social policy response");
   }
+  const subredditResponse = await chromeApi.runtime.sendMessage({
+    type: "policy:list-subreddits",
+  });
+  if (!isSubredditPoliciesResponse(subredditResponse)) {
+    throw new TypeError("Invalid subreddit policy response");
+  }
   const values = await chromeApi.storage.local.get(null);
   const blockedStore = new BlockedSubjectsStore(chromeApi.storage.local);
 
@@ -53,7 +73,7 @@ export async function mountOptions(
   const saveBlockedSubjects = (): void => {
     void blockedStore.set(blocked).then(() => {
       values["blocked-subjects"] = blocked;
-      if (blockedStatus) blockedStatus.textContent = "Saved locally";
+      announceStatus(blockedStatus, "Saved locally");
     });
   };
   const renderSubjects = (): void => {
@@ -176,7 +196,7 @@ export async function mountOptions(
       const prior = !toggle.checked;
       const mode = toggle.checked ? "protected" : "trusted";
       updateState();
-      if (platformStatus) platformStatus.textContent = "";
+      announceStatus(platformStatus, "");
       void chromeApi.runtime.sendMessage({
         type: "policy:set-social",
         platform: id,
@@ -188,11 +208,84 @@ export async function mountOptions(
       }).catch(() => {
         toggle.checked = prior;
         updateState();
-        if (platformStatus) platformStatus.textContent = SAVE_ERROR;
+        announceStatus(platformStatus, SAVE_ERROR, true);
       });
     });
     return label;
   }));
+
+  let subredditPolicies = [...subredditResponse.subredditPolicies]
+    .sort((first, second) => first.canonicalName.localeCompare(second.canonicalName));
+  const subredditExceptions = root.querySelector<HTMLElement>("#subreddit-exceptions");
+  const subredditList = root.querySelector<HTMLElement>("#subreddit-exceptions-list");
+  const subredditStatus = root.querySelector<HTMLElement>("#subreddit-exceptions-status");
+  let pendingSubredditReset: string | null = null;
+  const updateSubredditBusyState = (): void => {
+    subredditList?.querySelectorAll<HTMLButtonElement>("[data-reset-subreddit]")
+      .forEach((button) => {
+        button.disabled = pendingSubredditReset !== null;
+        if (button.dataset.resetSubreddit === pendingSubredditReset) {
+          button.setAttribute("aria-busy", "true");
+        } else {
+          button.removeAttribute("aria-busy");
+        }
+      });
+  };
+  const renderSubredditPolicies = (): void => {
+    if (!subredditExceptions || !subredditList) return;
+    subredditExceptions.hidden = subredditPolicies.length === 0;
+    subredditList.replaceChildren(...subredditPolicies.map(({
+      canonicalName,
+      displayName,
+      mode,
+    }) => {
+      const row = document.createElement("div");
+      row.className = "subreddit-rule";
+      row.dataset.subredditPolicy = canonicalName;
+      const name = document.createElement("strong");
+      name.textContent = `r/${displayName}`;
+      const state = document.createElement("span");
+      state.className = "subreddit-state";
+      state.textContent = mode === "protected" ? "On" : "Off";
+      const reset = document.createElement("button");
+      reset.type = "button";
+      reset.dataset.resetSubreddit = canonicalName;
+      reset.textContent = "Use Reddit setting";
+      reset.setAttribute("aria-label", `Use Reddit setting for r/${displayName}`);
+      reset.addEventListener("click", () => {
+        if (pendingSubredditReset !== null) return;
+        pendingSubredditReset = canonicalName;
+        updateSubredditBusyState();
+        announceStatus(subredditStatus, "");
+        void chromeApi.runtime.sendMessage({
+          type: "policy:reset-subreddit-setting",
+          canonicalName,
+        }).then((response) => {
+          if (!isSubredditResetResponse(response, canonicalName)) {
+            throw new TypeError("Invalid subreddit reset response");
+          }
+          subredditPolicies = subredditPolicies.filter((policy) => (
+            policy.canonicalName !== canonicalName
+          ));
+          pendingSubredditReset = null;
+          renderSubredditPolicies();
+          announceStatus(subredditStatus, `Using Reddit setting for r/${displayName}.`);
+          root.querySelector<HTMLInputElement>('[data-social-platform="reddit"]')?.focus();
+        }).catch(() => {
+          pendingSubredditReset = null;
+          renderSubredditPolicies();
+          announceStatus(subredditStatus, SAVE_ERROR, true);
+          subredditList.querySelector<HTMLButtonElement>(
+            `[data-reset-subreddit="${canonicalName}"]`,
+          )?.focus();
+        });
+      });
+      row.append(name, state, reset);
+      return row;
+    }));
+    updateSubredditBusyState();
+  };
+  renderSubredditPolicies();
 
   const rules = root.querySelector<HTMLElement>("#site-rules");
   const rulesStatus = root.querySelector<HTMLElement>("#site-rules-status");
@@ -232,11 +325,11 @@ export async function mountOptions(
         const prior = values[key];
         delete values[key];
         renderRules();
-        if (rulesStatus) rulesStatus.textContent = "";
+        announceStatus(rulesStatus, "");
         void chromeApi.storage.local.remove(key).catch(() => {
           values[key] = prior;
           renderRules();
-          if (rulesStatus) rulesStatus.textContent = SAVE_ERROR;
+          announceStatus(rulesStatus, SAVE_ERROR, true);
         });
       });
       row.append(copy, remove);
@@ -272,6 +365,35 @@ function isSocialWriteResponse(
   return value !== null && typeof value === "object" &&
     "platform" in value && value.platform === platform &&
     "mode" in value && value.mode === mode;
+}
+
+function isSubredditPoliciesResponse(value: unknown): value is {
+  subredditPolicies: Array<{
+    canonicalName: string;
+    displayName: string;
+    mode: "protected" | "trusted";
+  }>;
+} {
+  if (!value || typeof value !== "object" || !("subredditPolicies" in value)) return false;
+  return Array.isArray(value.subredditPolicies) && value.subredditPolicies.every((policy) => (
+    policy !== null &&
+    typeof policy === "object" &&
+    "canonicalName" in policy &&
+    isCanonicalSubredditName(policy.canonicalName) &&
+    "displayName" in policy &&
+    isSubredditDisplayNameForCanonical(policy.displayName, policy.canonicalName) &&
+    "mode" in policy &&
+    (policy.mode === "protected" || policy.mode === "trusted")
+  ));
+}
+
+function isSubredditResetResponse(
+  value: unknown,
+  canonicalName: string,
+): value is { canonicalName: string; removed: true } {
+  return value !== null && typeof value === "object" &&
+    "canonicalName" in value && value.canonicalName === canonicalName &&
+    "removed" in value && value.removed === true;
 }
 
 if (typeof chrome !== "undefined" && typeof document !== "undefined") {

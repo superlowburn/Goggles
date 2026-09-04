@@ -83,13 +83,13 @@ afterEach(() => {
 });
 
 describe("ProtectionRenderer", () => {
-  it("offers an unfrosted site control only at the 96x96 size gate", () => {
+  it("offers an unfrosted site control only at the 280x180 size gate", () => {
     const eligible = document.createElement("img");
     const narrow = document.createElement("img");
     const short = document.createElement("img");
-    vi.spyOn(eligible, "getBoundingClientRect").mockReturnValue(rect(10, 20, 96, 96));
-    vi.spyOn(narrow, "getBoundingClientRect").mockReturnValue(rect(10, 220, 95, 96));
-    vi.spyOn(short, "getBoundingClientRect").mockReturnValue(rect(120, 220, 96, 95));
+    vi.spyOn(eligible, "getBoundingClientRect").mockReturnValue(rect(10, 20, 280, 180));
+    vi.spyOn(narrow, "getBoundingClientRect").mockReturnValue(rect(10, 220, 279, 180));
+    vi.spyOn(short, "getBoundingClientRect").mockReturnValue(rect(120, 220, 280, 179));
     document.body.append(eligible, narrow, short);
     const renderer = new ProtectionRenderer();
 
@@ -112,6 +112,22 @@ describe("ProtectionRenderer", () => {
     expect(eligible.hasAttribute("data-eclipse-goggles-protected")).toBe(false);
     expect(renderer.debugLayerFor(narrow)?.querySelector(".eg-site-action")).toBeNull();
     expect(renderer.debugLayerFor(short)?.querySelector(".eg-site-action")).toBeNull();
+  });
+
+  it("keeps Frost again but hides Always show after revealing compact media", () => {
+    const image = document.createElement("img");
+    vi.spyOn(image, "getBoundingClientRect").mockReturnValue(rect(10, 20, 144, 144));
+    document.body.append(image);
+    const renderer = new ProtectionRenderer();
+    const handle = protect(renderer, image, {
+      siteControl: { mode: "trusted", save: vi.fn().mockResolvedValue(undefined) },
+    });
+
+    handle.reveal();
+
+    const layer = renderer.debugLayerFor(image)!;
+    expect(layer.querySelector(".eg-reprotect")).not.toBeNull();
+    expect(layer.querySelector(".eg-site-action")).toBeNull();
   });
 
   it("exposes the trusted-page control on candidate hover or keyboard focus", () => {

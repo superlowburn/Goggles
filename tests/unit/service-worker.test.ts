@@ -4,7 +4,13 @@ import {
   installFirstRun,
 } from "../../src/background/service-worker";
 import { defaultTrumpKeywords } from "../../src/shared/blocked-subjects";
-import { policyKey, prepareSocialPolicies, socialPolicyKey } from "../../src/shared/site-policy";
+import {
+  policyKey,
+  prepareSocialPolicies,
+  socialPolicyKey,
+  subredditDisplayKey,
+  subredditPolicyKey,
+} from "../../src/shared/site-policy";
 
 describe("handleExtensionMessage", () => {
   it("returns effective social policies to an extension Settings sender", async () => {
@@ -37,6 +43,91 @@ describe("handleExtensionMessage", () => {
         youtube: "protected",
       },
     });
+  });
+
+  it("lists valid subreddit exceptions for Settings in canonical order", async () => {
+    const deps = {
+      storage: {
+        get: vi.fn().mockResolvedValue({
+          "reddit-subreddit-policy:zebra": "trusted",
+          "reddit-subreddit-display:zebra": "ZeBrA",
+          "reddit-subreddit-policy:openai": "protected",
+          "reddit-subreddit-display:openai": "OpenAI",
+          "reddit-subreddit-policy:MixedCase": "trusted",
+          "reddit-subreddit-policy:no-hyphens": "protected",
+          "reddit-subreddit-policy:ignored": "strict",
+          "reddit-subreddit-display:ignored": "Ignored",
+        }),
+        set: vi.fn(),
+        remove: vi.fn(),
+      },
+      tabs: { get: vi.fn() },
+      extensionId: "extension-id",
+      policyReady: Promise.resolve(),
+    };
+
+    await expect(handleExtensionMessage(
+      { type: "policy:list-subreddits" },
+      {
+        id: "extension-id",
+        url: "chrome-extension://extension-id/options/options.html",
+      },
+      deps,
+    )).resolves.toEqual({
+      subredditPolicies: [
+        { canonicalName: "openai", displayName: "OpenAI", mode: "protected" },
+        { canonicalName: "zebra", displayName: "ZeBrA", mode: "trusted" },
+      ],
+    });
+    expect(deps.storage.get).toHaveBeenCalledWith(null);
+  });
+
+  it("resets a Settings subreddit exception after validating its canonical name", async () => {
+    const deps = {
+      storage: { get: vi.fn(), set: vi.fn(), remove: vi.fn().mockResolvedValue(undefined) },
+      tabs: { get: vi.fn() },
+      extensionId: "extension-id",
+      policyReady: Promise.resolve(),
+    };
+    const sender = {
+      id: "extension-id",
+      url: "chrome-extension://extension-id/dist/options/options.html",
+    };
+
+    await expect(handleExtensionMessage(
+      { type: "policy:reset-subreddit-setting", canonicalName: "openai" },
+      sender,
+      deps,
+    )).resolves.toEqual({ canonicalName: "openai", removed: true });
+    expect(deps.storage.remove).toHaveBeenCalledWith([
+      "reddit-subreddit-policy:openai",
+      "reddit-subreddit-display:openai",
+    ]);
+
+    await expect(handleExtensionMessage(
+      { type: "policy:reset-subreddit-setting", canonicalName: "OpenAI" },
+      sender,
+      deps,
+    )).resolves.toEqual({ error: "invalid-message" });
+    expect(deps.storage.remove).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { type: "policy:list-subreddits" },
+    { type: "policy:reset-subreddit-setting", canonicalName: "openai" },
+  ])("rejects Settings subreddit message from a non-Settings sender %#", async (message) => {
+    const deps = {
+      storage: { get: vi.fn(), set: vi.fn(), remove: vi.fn() },
+      tabs: { get: vi.fn() },
+      extensionId: "extension-id",
+      policyReady: Promise.resolve(),
+    };
+
+    await expect(handleExtensionMessage(message, {}, deps)).resolves.toEqual({
+      error: "invalid-message",
+    });
+    expect(deps.storage.get).not.toHaveBeenCalled();
+    expect(deps.storage.remove).not.toHaveBeenCalled();
   });
 
   it("accepts only validated social writes from its own extension", async () => {
@@ -145,6 +236,250 @@ describe("handleExtensionMessage", () => {
         subjects: [{ name: "Donald Trump", enabled: true, keywords: ["Donald Trump"] }],
       },
     });
+  });
+
+  it("returns subreddit scope and override inheritance for a verified Reddit tab", async () => {
+    const deps = {
+      storage: {
+        get: vi.fn().mockResolvedValue({
+          [subredditPolicyKey("openai")]: "trusted",
+          [socialPolicyKey("reddit")]: "protected",
+        }),
+        set: vi.fn(),
+      },
+      tabs: {
+        get: vi.fn().mockResolvedValue({
+          id: 7,
+          url: "https://www.reddit.com/r/OpenAI/comments/abc123/story",
+        }),
+      },
+    };
+
+    await expect(handleExtensionMessage(
+      { type: "policy:get-tab", tabId: 7 },
+      {},
+      deps,
+    )).resolves.toMatchObject({
+      origin: "https://www.reddit.com",
+      mode: "trusted",
+      reddit: {
+        displayName: "OpenAI",
+        canonicalName: "openai",
+        inheritedMode: "protected",
+        hasOverride: true,
+      },
+    });
+  });
+
+  it.each([
+    ["all", "all"],
+    ["Popular", "popular"],
+    ["MOD", "mod"],
+    ["Friends", "friends"],
+  ])(
+    "treats Reddit aggregate route r/%s as Reddit-wide context",
+    async (displayName, canonicalName) => {
+      const deps = {
+        storage: {
+          get: vi.fn().mockResolvedValue({
+            [subredditPolicyKey(canonicalName)]: "trusted",
+            [socialPolicyKey("reddit")]: "protected",
+          }),
+          set: vi.fn(),
+        },
+        tabs: {
+          get: vi.fn().mockResolvedValue({
+            id: 7,
+            url: `https://www.reddit.com/r/${displayName}/`,
+          }),
+        },
+      };
+
+      const response = await handleExtensionMessage(
+        { type: "policy:get-tab", tabId: 7 },
+        {},
+        deps,
+      );
+      expect(response).toMatchObject({
+        origin: "https://www.reddit.com",
+        mode: "protected",
+      });
+      expect(response).not.toHaveProperty("reddit");
+    },
+  );
+
+  it.each([
+    ["all", "all"],
+    ["Popular", "popular"],
+    ["MOD", "mod"],
+    ["Friends", "friends"],
+  ])(
+    "rejects a subreddit write for Reddit pseudo-community r/%s",
+    async (displayName, canonicalName) => {
+      const deps = {
+        storage: { get: vi.fn().mockResolvedValue({}), set: vi.fn(), remove: vi.fn() },
+        tabs: {
+          get: vi.fn().mockResolvedValue({
+            id: 7,
+            url: `https://www.reddit.com/r/${displayName}/`,
+          }),
+        },
+      };
+
+      await expect(handleExtensionMessage({
+        type: "policy:set-subreddit",
+        tabId: 7,
+        expectedSubreddit: canonicalName,
+        mode: "trusted",
+      }, {}, deps)).resolves.toEqual({ error: "subreddit-changed" });
+      expect(deps.storage.set).not.toHaveBeenCalled();
+    },
+  );
+
+  it("sets a subreddit override only after revalidating the current full tab URL", async () => {
+    const values: Record<string, unknown> = { [socialPolicyKey("reddit")]: "protected" };
+    const storage = {
+      get: vi.fn(async (key: null | string | string[]) => {
+        if (key === null) return values;
+        const keys = Array.isArray(key) ? key : [key];
+        return Object.fromEntries(keys.map((item) => [item, values[item]]));
+      }),
+      set: vi.fn(async (updates: Record<string, unknown>) => { Object.assign(values, updates); }),
+      remove: vi.fn(async (key: string | string[]) => {
+        for (const item of Array.isArray(key) ? key : [key]) delete values[item];
+      }),
+    };
+    const deps = {
+      storage,
+      tabs: {
+        get: vi.fn().mockResolvedValue({
+          id: 7,
+          url: "https://www.reddit.com/r/OpenAI/comments/abc123/story",
+        }),
+      },
+      policyReady: Promise.resolve(),
+    };
+
+    await expect(handleExtensionMessage({
+      type: "policy:set-subreddit",
+      tabId: 7,
+      expectedSubreddit: "openai",
+      mode: "trusted",
+    }, {}, deps)).resolves.toMatchObject({
+      mode: "trusted",
+      reddit: { canonicalName: "openai", hasOverride: true },
+    });
+    expect(storage.set).toHaveBeenCalledWith({
+      [subredditPolicyKey("openai")]: "trusted",
+      [subredditDisplayKey("openai")]: "OpenAI",
+    });
+  });
+
+  it("resets a subreddit override to its inherited Reddit-wide mode", async () => {
+    const values: Record<string, unknown> = {
+      [subredditPolicyKey("openai")]: "trusted",
+      [subredditDisplayKey("openai")]: "OpenAI",
+      [socialPolicyKey("reddit")]: "protected",
+    };
+    const storage = {
+      get: vi.fn(async (key: null | string | string[]) => {
+        if (key === null) return values;
+        const keys = Array.isArray(key) ? key : [key];
+        return Object.fromEntries(keys.map((item) => [item, values[item]]));
+      }),
+      set: vi.fn(),
+      remove: vi.fn(async (key: string | string[]) => {
+        for (const item of Array.isArray(key) ? key : [key]) delete values[item];
+      }),
+    };
+    const deps = {
+      storage,
+      tabs: {
+        get: vi.fn().mockResolvedValue({ id: 7, url: "https://old.reddit.com/r/OpenAI/" }),
+      },
+      policyReady: Promise.resolve(),
+    };
+
+    await expect(handleExtensionMessage({
+      type: "policy:reset-subreddit",
+      tabId: 7,
+      expectedSubreddit: "openai",
+    }, {}, deps)).resolves.toMatchObject({
+      mode: "protected",
+      reddit: {
+        canonicalName: "openai",
+        inheritedMode: "protected",
+        hasOverride: false,
+      },
+    });
+    expect(storage.remove).toHaveBeenCalledWith([
+      subredditPolicyKey("openai"),
+      subredditDisplayKey("openai"),
+    ]);
+  });
+
+  it("rejects a stale subreddit write after Reddit SPA navigation", async () => {
+    const deps = {
+      storage: {
+        get: vi.fn().mockResolvedValue({}),
+        set: vi.fn(),
+        remove: vi.fn(),
+      },
+      tabs: {
+        get: vi.fn().mockResolvedValue({ id: 7, url: "https://www.reddit.com/r/typescript/" }),
+      },
+    };
+
+    await expect(handleExtensionMessage({
+      type: "policy:set-subreddit",
+      tabId: 7,
+      expectedSubreddit: "openai",
+      mode: "trusted",
+    }, {}, deps)).resolves.toEqual({ error: "subreddit-changed" });
+    await expect(handleExtensionMessage({
+      type: "policy:reset-subreddit",
+      tabId: 7,
+      expectedSubreddit: "openai",
+    }, {}, deps)).resolves.toEqual({ error: "subreddit-changed" });
+    expect(deps.storage.set).not.toHaveBeenCalled();
+    expect(deps.storage.remove).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-finite tab id in a subreddit policy message", async () => {
+    const deps = {
+      storage: { get: vi.fn().mockResolvedValue({}), set: vi.fn(), remove: vi.fn() },
+      tabs: {
+        get: vi.fn().mockResolvedValue({ id: 7, url: "https://www.reddit.com/r/OpenAI/" }),
+      },
+    };
+
+    await expect(handleExtensionMessage({
+      type: "policy:set-subreddit",
+      tabId: Number.NaN,
+      expectedSubreddit: "openai",
+      mode: "trusted",
+    }, {}, deps)).resolves.toEqual({
+      error: "invalid-message",
+    });
+    expect(deps.tabs.get).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { type: "policy:set-subreddit", tabId: 7, expectedSubreddit: "OpenAI", mode: "trusted" },
+    { type: "policy:set-subreddit", tabId: 7, expectedSubreddit: "openai", mode: "strict" },
+    { type: "policy:reset-subreddit", tabId: 7, expectedSubreddit: "no-hyphens" },
+  ])("rejects a non-canonical subreddit policy message %#", async (message) => {
+    const deps = {
+      storage: { get: vi.fn().mockResolvedValue({}), set: vi.fn(), remove: vi.fn() },
+      tabs: {
+        get: vi.fn().mockResolvedValue({ id: 7, url: "https://www.reddit.com/r/OpenAI/" }),
+      },
+    };
+
+    await expect(handleExtensionMessage(message, {}, deps)).resolves.toEqual({
+      error: "invalid-message",
+    });
+    expect(deps.tabs.get).not.toHaveBeenCalled();
   });
 
   it("sets the verified tab origin policy", async () => {

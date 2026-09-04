@@ -5,11 +5,11 @@ import { describe, expect, it } from "vitest";
 const readJson = (path: string): { version: string } =>
   JSON.parse(readFileSync(path, "utf8")) as { version: string };
 
-describe("v0.2 release artifacts", () => {
-  it("uses version 0.2.0 in package and manifest metadata", () => {
+describe("v0.2.1 release artifacts", () => {
+  it("uses version 0.2.1 in package and manifest metadata", () => {
     const packagedManifest = JSON.parse(execFileSync(
       "unzip",
-      ["-p", "goggles-0.2.0.zip", "manifest.json"],
+      ["-p", "goggles-0.2.1.zip", "manifest.json"],
       { encoding: "utf8" },
     )) as { version: string };
     expect([
@@ -18,11 +18,11 @@ describe("v0.2 release artifacts", () => {
       readJson("manifest.json").version,
       readJson("public/manifest.json").version,
       packagedManifest.version,
-    ]).toEqual(["0.2.0", "0.2.0", "0.2.0", "0.2.0", "0.2.0"]);
+    ]).toEqual(["0.2.1", "0.2.1", "0.2.1", "0.2.1", "0.2.1"]);
   });
 
   it("packages the built extension at the ZIP root without removed provider assets", () => {
-    const entries = execFileSync("unzip", ["-Z1", "goggles-0.2.0.zip"], {
+    const entries = execFileSync("unzip", ["-Z1", "goggles-0.2.1.zip"], {
       encoding: "utf8",
     }).trim().split("\n");
 
