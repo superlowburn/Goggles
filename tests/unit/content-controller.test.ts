@@ -5,16 +5,23 @@ import {
   type DocumentObserverPort,
 } from "../../src/content/content-controller";
 import {
+  addSameDocumentNavigationListener,
   bootstrapContentScript,
   type ContentBootstrapDependencies,
 } from "../../src/content/index";
-import type { MediaCandidate, MediaKind, SiteMode } from "../../src/shared/media-types";
+import type {
+  MediaCandidate,
+  MediaKind,
+  PolicyContext,
+  SiteMode,
+} from "../../src/shared/media-types";
 import type {
   ProtectionHandle,
   ProtectionOptions,
 } from "../../src/protection/renderer";
-import { ProviderFrameController } from "../../src/media/provider-frames";
+import { ProtectionRenderer } from "../../src/protection/renderer";
 import { classifyElement } from "../../src/media/classifier";
+import type { BlockedSubjectsConfig } from "../../src/shared/blocked-subjects";
 
 class FakeDocumentObserver implements DocumentObserverPort {
   readonly start = vi.fn((callback: (elements: readonly Element[]) => void) => {
@@ -52,18 +59,21 @@ function rendererHarness() {
       reveal: vi.fn(() => {
         if (revealed || removed) return;
         revealed = true;
-        options.onReveal();
       }),
       reprotect: vi.fn(() => {
         if (!revealed || removed) return;
         revealed = false;
-        options.onReprotect();
       }),
       remove: vi.fn(() => {
         removed = true;
       }),
       update: vi.fn(),
       setDescriptionVisible: vi.fn(),
+      setPolicy: vi.fn((mode: SiteMode, siteControl?: ProtectionOptions["siteControl"]) => {
+        options.mode = mode;
+        if (siteControl) options.siteControl = siteControl;
+        else delete options.siteControl;
+      }),
       isRevealed: () => revealed,
       setBlockedSubject: vi.fn((blocked: boolean) => {
         options.blockedSubject = blocked;
@@ -90,29 +100,12 @@ function controllerHarness(
 ) {
   const observer = new FakeDocumentObserver();
   const renderer = rendererHarness();
-  const nativeVideo = {
-    secure: vi.fn(),
-    release: vi.fn(),
-    reprotect: vi.fn(),
-    restore: vi.fn(),
-  };
-  const providerFrames = {
-    gate: vi.fn(),
-    release: vi.fn(),
-    regate: vi.fn(),
-    restore: vi.fn(),
-    trust: vi.fn(),
-    forget: vi.fn(),
-    dispose: vi.fn(),
-  };
   const classify = vi.fn((element: Element) => classifications.get(element) ?? null);
   const resolveDescription = vi.fn((media: MediaCandidate) => `Description for ${media.kind}`);
   const controller = new ContentController({
     document,
     observer,
     renderer,
-    nativeVideo,
-    providerFrames,
     classify,
     resolveDescription,
     development: false,
@@ -122,8 +115,6 @@ function controllerHarness(
     controller,
     observer,
     renderer,
-    nativeVideo,
-    providerFrames,
     classify,
     resolveDescription,
   };
@@ -141,7 +132,192 @@ beforeEach(() => {
 });
 
 describe("ContentController", () => {
-  it("observes Trusted mode only to allow dynamic provider frames without protection", () => {
+  it("adds one exact-origin frost action to current and future trusted non-social media", async () => {
+    const first = document.createElement("img");
+    const second = document.createElement("img");
+    vi.spyOn(first, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 320, 200));
+    vi.spyOn(second, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 320, 200));
+    document.body.append(first, second);
+    const setSiteMode = vi.fn().mockResolvedValue(undefined);
+    const harness = controllerHarness(new Map([
+      [first, candidate(first, "image")],
+      [second, candidate(second, "image")],
+    ]), { enableSiteControl: true, setSiteMode });
+
+    harness.controller.start({ origin: "https://news.example", mode: "trusted" });
+    harness.observer.emit([first]);
+    harness.observer.emit([first, second]);
+
+    expect(harness.renderer.activeFor(first)).toHaveLength(1);
+    expect(harness.renderer.activeFor(second)).toHaveLength(1);
+    const control = harness.renderer.activeFor(first)[0]?.options.siteControl;
+    expect(control?.mode).toBe("protected");
+    await control?.save();
+    expect(setSiteMode).toHaveBeenCalledWith("https://news.example", "protected");
+  });
+
+  it("does not offer a frost action on a compact portrait product image", () => {
+    const image = document.createElement("img");
+    vi.spyOn(image, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 163, 200));
+    document.body.append(image);
+    const harness = controllerHarness(new Map([[image, candidate(image, "image")]]), {
+      enableSiteControl: true,
+      setSiteMode: vi.fn(),
+    });
+
+    harness.controller.start({ origin: "https://www.amazon.ca", mode: "trusted" });
+    harness.observer.emit([image]);
+
+    expect(harness.renderer.activeFor(image)).toHaveLength(0);
+  });
+
+  it("does not add Always frost controls to a social platform switched Off", () => {
+    const image = document.createElement("img");
+    document.body.append(image);
+    const harness = controllerHarness(new Map([[image, candidate(image, "image")]]), {
+      enableSiteControl: true,
+      setSiteMode: vi.fn(),
+    });
+
+    harness.controller.start({ origin: "https://old.reddit.com", mode: "trusted" });
+    harness.observer.emit([image]);
+
+    expect(harness.renderer.protect).not.toHaveBeenCalled();
+  });
+
+  it("keeps Reddit's protected media controls scoped to the item", () => {
+    const image = document.createElement("img");
+    document.body.append(image);
+    const harness = controllerHarness(new Map([[image, candidate(image, "image")]]), {
+      enableSiteControl: true,
+      setSiteMode: vi.fn(),
+    });
+
+    harness.controller.start({ origin: "https://www.reddit.com", mode: "protected" });
+    harness.observer.emit([image]);
+
+    const item = harness.renderer.activeFor(image)[0];
+    expect(item?.options.siteControl).toBeUndefined();
+    item?.handle.reveal();
+    expect(item?.handle.isRevealed()).toBe(true);
+    item?.handle.reprotect();
+    expect(item?.handle.isRevealed()).toBe(false);
+  });
+
+  it("does not create a trusted-page control root below 96x96", () => {
+    const image = document.createElement("img");
+    vi.spyOn(image, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 95, 96));
+    document.body.append(image);
+    const harness = controllerHarness(new Map([[image, candidate(image, "image")]]), {
+      enableSiteControl: true,
+      setSiteMode: vi.fn(),
+    });
+
+    harness.controller.start({ origin: "https://news.example", mode: "trusted" });
+    harness.observer.emit([image]);
+
+    expect(harness.renderer.protect).not.toHaveBeenCalled();
+  });
+
+  it("offers Always show on protected media and reconciles current and future ordinary media", async () => {
+    const current = document.createElement("img");
+    const future = document.createElement("img");
+    vi.spyOn(current, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 320, 200));
+    vi.spyOn(future, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 320, 200));
+    document.body.append(current, future);
+    const setSiteMode = vi.fn().mockResolvedValue(undefined);
+    const harness = controllerHarness(new Map([
+      [current, candidate(current, "image")],
+      [future, candidate(future, "image")],
+    ]), { enableSiteControl: true, setSiteMode });
+    harness.controller.start({ origin: "https://news.example", mode: "protected" });
+    harness.observer.emit([current]);
+
+    const control = harness.renderer.activeFor(current)[0]?.options.siteControl;
+    expect(control?.mode).toBe("trusted");
+    await control?.save();
+    expect(setSiteMode).toHaveBeenCalledWith("https://news.example", "trusted");
+
+    harness.controller.applyMode("trusted");
+    harness.observer.emit([current, future]);
+    expect(harness.renderer.activeFor(current)[0]?.options.siteControl?.mode).toBe("protected");
+    expect(harness.renderer.activeFor(future)[0]?.options.siteControl?.mode).toBe("protected");
+  });
+
+  it("keeps a manually revealed subject while Always show removes only ordinary protection", async () => {
+    const subject = document.createElement("img");
+    subject.alt = "Donald Trump at an event";
+    const ordinary = document.createElement("img");
+    ordinary.alt = "A quiet lake";
+    const futureSubject = document.createElement("img");
+    futureSubject.alt = "Donald Trump at another event";
+    vi.spyOn(ordinary, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 320, 200));
+    document.body.append(subject, ordinary, futureSubject);
+    const harness = controllerHarness(new Map([
+      [subject, candidate(subject, "image")],
+      [ordinary, candidate(ordinary, "image")],
+      [futureSubject, candidate(futureSubject, "image")],
+    ]), { enableSiteControl: true, setSiteMode: vi.fn().mockResolvedValue(undefined) });
+    harness.controller.start({
+      origin: "https://news.example",
+      mode: "protected",
+      blockedSubjects: { enabled: true, keywords: ["Trump"] },
+    });
+    harness.observer.emit([subject, ordinary]);
+    const subjectRecord = harness.renderer.activeFor(subject)[0]!;
+    subjectRecord.handle.reveal();
+
+    await harness.renderer.activeFor(ordinary)[0]?.options.siteControl?.save();
+    harness.controller.applyMode("trusted");
+    harness.observer.emit([subject, ordinary, futureSubject]);
+
+    expect(harness.renderer.activeFor(subject)[0]).toBe(subjectRecord);
+    expect(subjectRecord.handle.isRevealed()).toBe(true);
+    expect(harness.renderer.activeFor(ordinary)[0]?.options.siteControl?.mode).toBe("protected");
+    expect(harness.renderer.activeFor(futureSubject)[0]?.options.blockedSubject).toBe(true);
+    expect(harness.renderer.activeFor(futureSubject)[0]?.handle.isRevealed()).toBe(false);
+  });
+
+  it("refreshes a retained revealed subject so refrost and rereveal do not offer stale Always show", async () => {
+    const image = document.createElement("img");
+    image.alt = "Donald Trump at an event";
+    vi.spyOn(image, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 320, 200));
+    document.body.append(image);
+    const observer = new FakeDocumentObserver();
+    const renderer = new ProtectionRenderer({ trustedActivation: () => true });
+    const setSiteMode = vi.fn().mockResolvedValue(undefined);
+    const controller = new ContentController({
+      document,
+      observer,
+      renderer,
+      classify: (element) => element === image ? candidate(image, "image") : null,
+      resolveDescription: () => "Donald Trump at an event",
+      enableSiteControl: true,
+      setSiteMode,
+    });
+    controller.start({
+      origin: "https://news.example",
+      mode: "protected",
+      blockedSubjects: { enabled: true, keywords: ["Trump"] },
+    });
+    observer.emit([image]);
+    const layer = renderer.debugLayerFor(image)!;
+    layer.querySelector<HTMLButtonElement>(".eg-reveal-surface")!.click();
+    const alwaysShow = layer.querySelector<HTMLButtonElement>(".eg-site-action")!;
+
+    alwaysShow.click();
+    await vi.waitFor(() => expect(setSiteMode).toHaveBeenCalledWith("https://news.example", "trusted"));
+    controller.applyMode("trusted");
+    expect(layer.querySelector(".eg-reprotect")).not.toBeNull();
+
+    layer.querySelector<HTMLButtonElement>(".eg-reprotect")!.click();
+    layer.querySelector<HTMLButtonElement>(".eg-reveal-surface")!.click();
+
+    expect(layer.querySelector(".eg-reprotect")).not.toBeNull();
+    expect(layer.querySelector(".eg-site-action")).toBeNull();
+  });
+
+  it("observes Trusted mode without protecting unrelated dynamic media", () => {
     const image = document.createElement("img");
     const frame = document.createElement("iframe");
     frame.src = "https://www.youtube.com/embed/trusted-dynamic";
@@ -153,7 +329,6 @@ describe("ContentController", () => {
 
     expect(harness.observer.start).toHaveBeenCalledTimes(1);
     expect(harness.observer.scan).toHaveBeenCalledWith(document);
-    expect(harness.providerFrames.trust).toHaveBeenCalledWith(frame);
     expect(harness.renderer.protect).not.toHaveBeenCalled();
   });
 
@@ -293,40 +468,6 @@ describe("ContentController", () => {
     expect(harness.renderer.activeFor(providerFrame)).toHaveLength(1);
   });
 
-  it("matches a dynamic provider frame before trusting can replace its source", () => {
-    const providerFrame = document.createElement("iframe");
-    providerFrame.src = "https://www.youtube.com/embed/trump-campaign";
-    providerFrame.title = "Donald Trump campaign video";
-    const providerFrames = {
-      gate: vi.fn(),
-      release: vi.fn(),
-      regate: vi.fn(),
-      restore: vi.fn(),
-      trust: vi.fn((frame: HTMLIFrameElement) => {
-        frame.src = "about:blank";
-      }),
-      forget: vi.fn(),
-      dispose: vi.fn(),
-    };
-    const classify = vi.fn((element: Element) =>
-      element === providerFrame && providerFrame.src.includes("youtube.com")
-        ? candidate(providerFrame, "video-iframe")
-        : null,
-    );
-    const harness = controllerHarness(new Map(), { classify, providerFrames });
-
-    harness.controller.start({
-      origin: "https://news.example",
-      mode: "trusted",
-      blockedSubjects: { enabled: true, keywords: ["Trump"] },
-    });
-    document.body.append(providerFrame);
-    harness.observer.emit([providerFrame]);
-
-    expect(harness.providerFrames.trust).not.toHaveBeenCalled();
-    expect(harness.renderer.activeFor(providerFrame)).toHaveLength(1);
-  });
-
   it("adds ordinary media when a Trusted site becomes Protected without duplicating subjects", () => {
     const blockedImage = document.createElement("img");
     blockedImage.alt = "Donald Trump at a campaign event";
@@ -450,45 +591,6 @@ describe("ContentController", () => {
     );
   });
 
-  it("secures a native video before rendering and release never starts playback", () => {
-    const video = document.createElement("video");
-    document.body.append(video);
-    const play = vi.spyOn(video, "play");
-    const harness = controllerHarness(
-      new Map([[video, candidate(video, "native-video")]]),
-    );
-    harness.controller.start({ origin: "https://news.example", mode: "protected" });
-    harness.observer.emit([video]);
-
-    expect(harness.nativeVideo.secure.mock.invocationCallOrder[0]).toBeLessThan(
-      harness.renderer.protect.mock.invocationCallOrder[0]!,
-    );
-    harness.renderer.items[0]?.handle.reveal();
-
-    expect(harness.nativeVideo.release).toHaveBeenCalledWith(video);
-    expect(play).not.toHaveBeenCalled();
-  });
-
-  it("reprotects only the selected strict native video", () => {
-    const first = document.createElement("video");
-    const second = document.createElement("video");
-    document.body.append(first, second);
-    const harness = controllerHarness(
-      new Map([
-        [first, candidate(first, "native-video")],
-        [second, candidate(second, "native-video")],
-      ]),
-    );
-    harness.controller.start({ origin: "https://news.example", mode: "strict" });
-    harness.observer.emit([first, second]);
-
-    harness.renderer.items[0]?.handle.reveal();
-    harness.renderer.items[0]?.handle.reprotect();
-
-    expect(harness.nativeVideo.reprotect).toHaveBeenCalledTimes(1);
-    expect(harness.nativeVideo.reprotect).toHaveBeenCalledWith(first);
-  });
-
   it("persists the site description choice and applies it to current and future media", () => {
     const first = document.createElement("img");
     const second = document.createElement("img");
@@ -522,55 +624,7 @@ describe("ContentController", () => {
     expect(secondOptions.descriptionsVisible).toBe(true);
   });
 
-  it("gates a provider before rendering and releases or regates only that frame", () => {
-    const frame = document.createElement("iframe");
-    frame.src = "https://www.youtube.com/embed/abc?start=10";
-    document.body.append(frame);
-    const harness = controllerHarness(
-      new Map([[frame, candidate(frame, "video-iframe")]]),
-    );
-    harness.controller.start({ origin: "https://news.example", mode: "strict" });
-    harness.observer.emit([frame]);
-
-    expect(harness.providerFrames.gate.mock.invocationCallOrder[0]).toBeLessThan(
-      harness.renderer.protect.mock.invocationCallOrder[0]!,
-    );
-    harness.renderer.items[0]?.handle.reveal();
-    harness.renderer.items[0]?.handle.reprotect();
-
-    expect(harness.providerFrames.release).toHaveBeenCalledWith(frame);
-    expect(harness.providerFrames.regate).toHaveBeenCalledWith(frame);
-  });
-
-  it("re-protects and emits only a sanitized diagnostic when a provider allow rule fails", async () => {
-    const frame = document.createElement("iframe");
-    frame.src = "https://www.youtube.com/embed/private-video";
-    document.body.append(frame);
-    const log = vi.fn();
-    const providerFrames = {
-      gate: vi.fn(),
-      release: vi.fn().mockRejectedValue(new Error("secret provider URL failed")),
-      regate: vi.fn(),
-      restore: vi.fn(),
-      trust: vi.fn(),
-      forget: vi.fn(),
-    };
-    const harness = controllerHarness(
-      new Map([[frame, candidate(frame, "video-iframe")]]),
-      { providerFrames, development: true, logDiagnostic: log },
-    );
-    harness.controller.start({ origin: "https://news.example", mode: "protected" });
-    harness.observer.emit([frame]);
-
-    harness.renderer.items[0]?.handle.reveal();
-
-    await vi.waitFor(() => expect(harness.renderer.items[0]?.handle.isRevealed()).toBe(false));
-    expect(providerFrames.regate).toHaveBeenCalledWith(frame);
-    expect(log).toHaveBeenCalledWith("IFRAME", "provider allow rule failed");
-    expect(JSON.stringify(log.mock.calls)).not.toContain("secret");
-  });
-
-  it("switching to Trusted removes layers and restores native and provider state", () => {
+  it("switching to Trusted removes image and video layers", () => {
     const image = document.createElement("img");
     const video = document.createElement("video");
     const frame = document.createElement("iframe");
@@ -593,38 +647,6 @@ describe("ContentController", () => {
       (removes: Array<ReturnType<typeof vi.fn>>) =>
         removes.every((remove) => remove.mock.calls.length === 1),
     );
-    expect(harness.nativeVideo.restore).toHaveBeenCalledWith(video);
-    expect(harness.providerFrames.restore).toHaveBeenCalledWith(frame);
-  });
-
-  it("forgets provider state without a restore allow rule during page teardown", () => {
-    const frame = document.createElement("iframe");
-    document.body.append(frame);
-    const harness = controllerHarness(
-      new Map([[frame, candidate(frame, "video-iframe")]]),
-    );
-    harness.controller.start({ origin: "https://news.example", mode: "protected" });
-    harness.observer.emit([frame]);
-
-    harness.controller.stop({ restoreMedia: false });
-
-    expect(harness.providerFrames.forget).toHaveBeenCalledWith(frame);
-    expect(harness.providerFrames.restore).not.toHaveBeenCalled();
-    expect(harness.providerFrames.dispose).toHaveBeenCalledTimes(1);
-  });
-
-  it("disposes Trusted provider state during page teardown", () => {
-    const frame = document.createElement("iframe");
-    frame.src = "https://www.youtube.com/embed/trusted";
-    document.body.append(frame);
-    const harness = controllerHarness();
-    harness.controller.start({ origin: "https://news.example", mode: "trusted" });
-    harness.observer.emit([frame]);
-
-    harness.controller.stop({ restoreMedia: false });
-
-    expect(harness.providerFrames.dispose).toHaveBeenCalledTimes(1);
-    expect(harness.providerFrames.restore).not.toHaveBeenCalled();
   });
 
   it("keeps a deliberately revealed subject visible across a legacy Strict transition", () => {
@@ -669,6 +691,44 @@ describe("ContentController", () => {
     expect(harness.renderer.items[0]?.handle.remove).toHaveBeenCalledTimes(1);
     expect(harness.classify).toHaveBeenCalledTimes(2);
     expect(harness.renderer.protect).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a revealed provider frame visible through presentation-only attribute churn", () => {
+    const frame = document.createElement("iframe");
+    frame.src = "https://www.youtube.com/embed/astronomy?autoplay=1";
+    document.body.append(frame);
+    const harness = controllerHarness(
+      new Map([[frame, candidate(frame, "video-iframe")]]),
+    );
+    harness.controller.start({ origin: "https://news.example", mode: "protected" });
+    harness.observer.emit([frame]);
+    harness.renderer.items[0]?.handle.reveal();
+
+    frame.title = "Updated video title";
+    harness.observer.emit([frame], [frame]);
+
+    expect(harness.renderer.protect).toHaveBeenCalledTimes(1);
+    expect(harness.renderer.items[0]?.handle.isRevealed()).toBe(true);
+    expect(harness.renderer.items[0]?.handle.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("reclassifies a revealed provider frame after its source is replaced", () => {
+    const frame = document.createElement("iframe");
+    frame.src = "https://www.youtube.com/embed/first?autoplay=1";
+    document.body.append(frame);
+    const harness = controllerHarness(
+      new Map([[frame, candidate(frame, "video-iframe")]]),
+    );
+    harness.controller.start({ origin: "https://news.example", mode: "protected" });
+    harness.observer.emit([frame]);
+    harness.renderer.items[0]?.handle.reveal();
+
+    frame.src = "https://player.vimeo.com/video/second?autoplay=1";
+    harness.observer.emit([frame], [frame]);
+
+    expect(harness.renderer.items[0]?.handle.remove).toHaveBeenCalledTimes(1);
+    expect(harness.renderer.protect).toHaveBeenCalledTimes(2);
+    expect(harness.renderer.items[1]?.handle.isRevealed()).toBe(false);
   });
 
   it("isolates malformed candidates and logs no page-derived values", () => {
@@ -734,7 +794,7 @@ describe("ContentController", () => {
     }
   });
 
-  it("keeps native protection during attribute churn and continues the batch", () => {
+  it("rebuilds a native-video overlay during attribute churn and continues the batch", () => {
     const video = document.createElement("video");
     const healthyImage = document.createElement("img");
     document.body.append(video, healthyImage);
@@ -750,56 +810,11 @@ describe("ContentController", () => {
 
     harness.observer.emit([video, healthyImage], [video]);
 
-    expect(harness.nativeVideo.reprotect).toHaveBeenCalledWith(video);
-    expect(harness.nativeVideo.restore).not.toHaveBeenCalled();
-    expect(harness.renderer.items[0]?.handle.remove).not.toHaveBeenCalled();
-    expect(harness.renderer.protect).toHaveBeenCalledTimes(2);
-    expect(harness.renderer.items[1]?.candidate).toBe(imageCandidate);
-  });
-
-  it("regates an externally replaced provider source and reveals that exact new source", async () => {
-    const frame = document.createElement("iframe");
-    frame.setAttribute("src", "https://www.youtube.com/embed/first?start=10#one");
-    document.body.append(frame);
-    const media = candidate(frame, "video-iframe");
-    const navigate = vi.fn();
-    const realProviderFrames = new ProviderFrameController({
-      authorize: async (source, disableAutoplay) => {
-        const url = new URL(source);
-        if (disableAutoplay) url.searchParams.set("autoplay", "0");
-        url.searchParams.set("eg_eclipse_goggles", "controller-token");
-        return { grantId: 91, source: url.href };
-      },
-      revoke: vi.fn().mockResolvedValue(undefined),
-    }, {
-      prepare: vi.fn().mockResolvedValue(undefined),
-      navigate,
-    });
-    const harness = controllerHarness(new Map([[frame, media]]), {
-      providerFrames: realProviderFrames,
-    });
-    harness.controller.start({ origin: "https://news.example", mode: "protected" });
-    harness.observer.emit([frame]);
-    expect(frame.getAttribute("src")).toBe("https://www.youtube.com/embed/first?start=10#one");
-
-    const replacement = "https://player.vimeo.com/video/456?autoplay=0#two";
-    frame.setAttribute("src", replacement);
-    harness.observer.emit([frame], [frame]);
-
     expect(harness.renderer.items[0]?.handle.remove).toHaveBeenCalledTimes(1);
-    expect(harness.renderer.protect).toHaveBeenCalledTimes(2);
-    expect(frame.getAttribute("src")).toBe(replacement);
-    harness.renderer.items[1]?.handle.reveal();
-    await vi.waitFor(() => {
-      expect(navigate).toHaveBeenCalledTimes(1);
-      const released = new URL(navigate.mock.calls[0]![1]);
-      expect(released.origin + released.pathname).toBe("https://player.vimeo.com/video/456");
-      expect(released.searchParams.get("autoplay")).toBe("0");
-      expect(released.searchParams.get("eg_eclipse_goggles")).toBe("controller-token");
-      expect(released.hash).toBe("#two");
-      expect(frame.getAttribute("src")).toBe(replacement);
-    });
+    expect(harness.renderer.protect).toHaveBeenCalledTimes(3);
+    expect(harness.renderer.items[2]?.candidate).toBe(imageCandidate);
   });
+
 });
 
 function bootstrapHarness(
@@ -815,6 +830,7 @@ function bootstrapHarness(
   sendMessage: ReturnType<typeof vi.fn>;
   watchPolicy: ReturnType<typeof vi.fn>;
   addPageHideListener: ReturnType<typeof vi.fn>;
+  addNavigationListener: ReturnType<typeof vi.fn>;
 } {
   const controller = {
     start: vi.fn(),
@@ -831,7 +847,8 @@ function bootstrapHarness(
   const getBlockedSubjects = vi.fn().mockResolvedValue({ enabled: false, keywords: [] });
   const watchBlockedSubjects = vi.fn(() => vi.fn());
   const addPageHideListener = vi.fn();
-  const dependencies: ContentBootstrapDependencies = {
+  const addNavigationListener = vi.fn(() => vi.fn());
+  const dependencies = {
     href: "https://child.example/story",
     isChildFrame: false,
     parentLocation: () => null,
@@ -842,13 +859,72 @@ function bootstrapHarness(
     watchPolicy,
     watchBlockedSubjects,
     addPageHideListener,
+    addNavigationListener,
     ...overrides,
   };
-  return { dependencies, controller, sendMessage, watchPolicy, addPageHideListener };
+  return {
+    dependencies,
+    controller,
+    sendMessage,
+    watchPolicy,
+    addPageHideListener,
+    addNavigationListener,
+  };
+}
+
+function redditPolicy(mode: SiteMode, displayName?: string): PolicyContext {
+  return {
+    origin: "https://www.reddit.com",
+    mode,
+    ...(displayName
+      ? {
+        reddit: {
+          displayName,
+          canonicalName: displayName.toLowerCase(),
+          inheritedMode: "protected" as const,
+          hasOverride: mode === "trusted",
+        },
+      }
+      : {}),
+  };
 }
 
 describe("content-script bootstrap", () => {
-  it("falls back to Protected when policy messaging rejects without persisting or watching", async () => {
+  it("uses popstate as the same-document navigation fallback", () => {
+    const listener = vi.fn();
+    const stop = addSameDocumentNavigationListener(listener);
+
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    stop();
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses currententrychange when the Navigation API is available", () => {
+    const navigation = new EventTarget();
+    Object.defineProperty(window, "navigation", { configurable: true, value: navigation });
+    const listener = vi.fn();
+    const originalUrl = window.location.href;
+
+    try {
+      const stop = addSameDocumentNavigationListener(listener);
+      window.history.pushState({}, "", "/r/typescript/");
+      navigation.dispatchEvent(new Event("currententrychange"));
+      window.dispatchEvent(new PopStateEvent("popstate"));
+      expect(listener).toHaveBeenCalledWith(window.location.href);
+
+      stop();
+      navigation.dispatchEvent(new Event("currententrychange"));
+      expect(listener).toHaveBeenCalledTimes(1);
+    } finally {
+      window.history.replaceState({}, "", originalUrl);
+      Reflect.deleteProperty(window, "navigation");
+    }
+  });
+
+  it("falls back to Trusted on non-social sites when policy messaging rejects", async () => {
     const harness = bootstrapHarness({
       sendMessage: vi.fn().mockRejectedValue(new Error("storage unavailable")),
     });
@@ -857,13 +933,13 @@ describe("content-script bootstrap", () => {
 
     expect(harness.controller.start).toHaveBeenCalledWith({
       origin: "https://child.example",
-      mode: "protected",
+      mode: "trusted",
     });
-    expect(harness.watchPolicy).not.toHaveBeenCalled();
+    expect(harness.watchPolicy).toHaveBeenCalledWith("https://child.example", expect.any(Function));
     expect(chrome.storage.local.set).not.toHaveBeenCalled();
   });
 
-  it("falls back to Protected when the policy response is rejected as malformed", async () => {
+  it("falls back to Trusted on a non-social site when the policy response is malformed", async () => {
     const harness = bootstrapHarness({
       sendMessage: vi.fn().mockResolvedValue({ error: "unsupported-page" }),
     });
@@ -872,10 +948,118 @@ describe("content-script bootstrap", () => {
 
     expect(harness.controller.start).toHaveBeenCalledWith({
       origin: "https://child.example",
+      mode: "trusted",
+    });
+    expect(harness.watchPolicy).toHaveBeenCalledWith("https://child.example", expect.any(Function));
+    expect(chrome.storage.local.set).not.toHaveBeenCalled();
+  });
+
+  it("falls back to Protected on social sites when policy messaging rejects", async () => {
+    const harness = bootstrapHarness({
+      href: "https://www.reddit.com/r/goggles",
+      sendMessage: vi.fn().mockRejectedValue(new Error("storage unavailable")),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+
+    expect(harness.controller.start).toHaveBeenCalledWith({
+      origin: "https://www.reddit.com",
       mode: "protected",
     });
-    expect(harness.watchPolicy).not.toHaveBeenCalled();
-    expect(chrome.storage.local.set).not.toHaveBeenCalled();
+  });
+
+  it("live-reconciles a fallback contextual action after its policy save", async () => {
+    const image = document.createElement("img");
+    vi.spyOn(image, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 320, 200));
+    document.body.append(image);
+    const observer = new FakeDocumentObserver();
+    const renderer = rendererHarness();
+    let policyListener: ((mode: SiteMode) => void) | undefined;
+    const setSiteMode = vi.fn(async (_origin: string, mode: SiteMode) => {
+      policyListener?.(mode);
+    });
+    const controller = new ContentController({
+      document,
+      observer,
+      renderer,
+      classify: (element) => element === image ? candidate(image, "image") : null,
+      resolveDescription: () => "A quiet lake",
+      enableSiteControl: true,
+      setSiteMode,
+    });
+    const dependencies = bootstrapHarness({
+      sendMessage: vi.fn().mockRejectedValue(new Error("worker unavailable")),
+      createController: () => controller,
+      watchPolicy: vi.fn((_origin, listener) => {
+        policyListener = listener;
+        return vi.fn();
+      }),
+    }).dependencies;
+
+    await bootstrapContentScript(dependencies);
+    observer.emit([image]);
+    const action = renderer.activeFor(image)[0]?.options.siteControl;
+    expect(action?.mode).toBe("protected");
+
+    await action?.save();
+    observer.emit([image]);
+
+    expect(setSiteMode).toHaveBeenCalledWith("https://child.example", "protected");
+    expect(renderer.activeFor(image)).toHaveLength(1);
+    expect(renderer.activeFor(image)[0]?.options.mode).toBe("protected");
+    expect(renderer.activeFor(image)[0]?.options.siteControl?.mode).toBe("trusted");
+  });
+
+  it("keeps configured subject matches frosted after a Reddit fallback reveal", async () => {
+    const subject = document.createElement("img");
+    subject.alt = "Donald Trump at an event";
+    const ordinary = document.createElement("img");
+    ordinary.alt = "A quiet lake";
+    vi.spyOn(subject, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 320, 200));
+    vi.spyOn(ordinary, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 220, 320, 200));
+    document.body.append(subject, ordinary);
+    const observer = new FakeDocumentObserver();
+    const renderer = new ProtectionRenderer({ trustedActivation: () => true });
+    let policyListener: ((mode: SiteMode) => void) | undefined;
+    let subjectListener: ((config: BlockedSubjectsConfig) => void) | undefined;
+    const setSiteMode = vi.fn(async (_origin: string, mode: SiteMode) => policyListener?.(mode));
+    const controller = new ContentController({
+      document,
+      observer,
+      renderer,
+      classify: (element) => element === subject
+        ? candidate(subject, "image")
+        : element === ordinary ? candidate(ordinary, "image") : null,
+      resolveDescription: (media) => media.element.getAttribute("alt") ?? "",
+      enableSiteControl: true,
+      setSiteMode,
+    });
+    const harness = bootstrapHarness({
+      href: "https://old.reddit.com/r/goggles",
+      sendMessage: vi.fn().mockRejectedValue(new Error("worker unavailable")),
+      createController: () => controller,
+      getBlockedSubjects: vi.fn().mockResolvedValue({ enabled: true, keywords: ["Trump"] }),
+      watchPolicy: vi.fn((_origin, listener) => {
+        policyListener = listener;
+        return vi.fn();
+      }),
+      watchBlockedSubjects: vi.fn((listener) => {
+        subjectListener = listener;
+        return vi.fn();
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    observer.emit([subject, ordinary]);
+    const ordinaryLayer = renderer.debugLayerFor(ordinary)!;
+    ordinaryLayer.querySelector<HTMLButtonElement>(".eg-reveal-surface")!.click();
+
+    expect(subjectListener).toBeTypeOf("function");
+    expect(renderer.debugLayerFor(subject)?.querySelector(".eg-reveal-surface")).not.toBeNull();
+    expect(subject.getAttribute("data-eclipse-goggles-protected")).toBe("image");
+    expect(ordinary.getAttribute("data-eclipse-goggles-protected")).toBeNull();
+    expect(ordinaryLayer.querySelector(".eg-site-action")).toBeNull();
+    expect(ordinaryLayer.querySelector(".eg-reprotect")).not.toBeNull();
   });
 
   it("starts the returned policy and watches only its exact top origin", async () => {
@@ -898,6 +1082,433 @@ describe("content-script bootstrap", () => {
       | undefined;
     listener?.("trusted");
     expect(harness.controller.applyMode).toHaveBeenCalledWith("trusted");
+  });
+
+  it("watches the full URL for a top-frame Reddit subreddit policy", async () => {
+    const href = "https://www.reddit.com/r/OpenAI/comments/abc/example";
+    const harness = bootstrapHarness({
+      href,
+      sendMessage: vi.fn().mockResolvedValue({
+        origin: "https://www.reddit.com",
+        mode: "trusted",
+        reddit: {
+          displayName: "OpenAI",
+          canonicalName: "openai",
+          inheritedMode: "protected",
+          hasOverride: true,
+        },
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+
+    expect(harness.watchPolicy).toHaveBeenCalledWith(href, expect.any(Function));
+  });
+
+  it("applies a Reddit navigation that wins the initial pending policy lookup", async () => {
+    const openAiUrl = "https://www.reddit.com/r/OpenAI/";
+    const typescriptUrl = "https://www.reddit.com/r/typescript/";
+    let onNavigate: ((href: string) => void) | undefined;
+    let resolveOpenAi!: (value: unknown) => void;
+    const openAiPolicy = new Promise<unknown>((resolve) => {
+      resolveOpenAi = resolve;
+    });
+    const sendMessage = vi.fn()
+      .mockImplementationOnce(() => openAiPolicy)
+      .mockResolvedValue(redditPolicy("trusted", "typescript"));
+    const harness = bootstrapHarness({
+      href: openAiUrl,
+      sendMessage,
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return vi.fn();
+      }),
+    });
+
+    const bootstrapping = bootstrapContentScript(harness.dependencies);
+    await vi.waitFor(() => expect(onNavigate).toBeTypeOf("function"));
+    onNavigate?.(typescriptUrl);
+    resolveOpenAi(redditPolicy("protected", "OpenAI"));
+    await bootstrapping;
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(3));
+
+    expect(harness.controller.start).toHaveBeenCalledTimes(1);
+    expect(harness.controller.applyMode).toHaveBeenCalledWith("trusted");
+    expect(harness.watchPolicy).toHaveBeenLastCalledWith(typescriptUrl, expect.any(Function));
+  });
+
+  it("rebinds and applies the destination policy after Reddit same-document navigation", async () => {
+    const openAiUrl = "https://www.reddit.com/r/OpenAI/comments/abc/example";
+    const typescriptUrl = "https://www.reddit.com/r/typescript/";
+    let href = openAiUrl;
+    let onNavigate: ((href: string) => void) | undefined;
+    const stopOpenAi = vi.fn();
+    const stopTypescript = vi.fn();
+    const sendMessage = vi.fn(async () => href === openAiUrl
+      ? redditPolicy("protected", "OpenAI")
+      : redditPolicy("trusted", "typescript"));
+    const harness = bootstrapHarness({
+      href,
+      sendMessage,
+      watchPolicy: vi.fn((scope) => scope === openAiUrl ? stopOpenAi : stopTypescript),
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return vi.fn();
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    href = typescriptUrl;
+    harness.dependencies.href = typescriptUrl;
+    onNavigate?.(typescriptUrl);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(3));
+
+    expect(stopOpenAi).toHaveBeenCalledTimes(1);
+    expect(harness.dependencies.watchPolicy).toHaveBeenLastCalledWith(
+      typescriptUrl,
+      expect.any(Function),
+    );
+    expect(harness.controller.applyMode).toHaveBeenCalledWith("trusted");
+  });
+
+  it("keeps the safe destination mode when confirmation names the wrong subreddit", async () => {
+    const openAiUrl = "https://www.reddit.com/r/OpenAI/";
+    const typescriptUrl = "https://www.reddit.com/r/typescript/";
+    let onNavigate: ((href: string) => void) | undefined;
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("trusted", "javascript"));
+    const harness = bootstrapHarness({
+      href: openAiUrl,
+      sendMessage,
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return vi.fn();
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    onNavigate?.(typescriptUrl);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(3));
+
+    expect(harness.controller.applyMode.mock.calls.map(([mode]) => mode)).toEqual(["protected"]);
+    expect(harness.watchPolicy).toHaveBeenLastCalledWith(typescriptUrl, expect.any(Function));
+  });
+
+  it("keeps the safe home mode when confirmation still has subreddit context", async () => {
+    const openAiUrl = "https://www.reddit.com/r/OpenAI/";
+    const homeUrl = "https://www.reddit.com/";
+    let onNavigate: ((href: string) => void) | undefined;
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"));
+    const harness = bootstrapHarness({
+      href: openAiUrl,
+      sendMessage,
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return vi.fn();
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    onNavigate?.(homeUrl);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(3));
+
+    expect(harness.controller.applyMode.mock.calls.map(([mode]) => mode)).toEqual(["protected"]);
+    expect(harness.watchPolicy).toHaveBeenLastCalledWith(homeUrl, expect.any(Function));
+  });
+
+  it.each([
+    ["rejected", () => Promise.reject(new Error("worker unavailable"))],
+    ["malformed", () => Promise.resolve({ error: "unsupported-page" })],
+  ])("falls back to Protected when a Reddit destination policy is %s", async (_case, response) => {
+    const openAiUrl = "https://www.reddit.com/r/OpenAI/";
+    const typescriptUrl = "https://www.reddit.com/r/typescript/";
+    let onNavigate: ((href: string) => void) | undefined;
+    const stopOpenAi = vi.fn();
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"))
+      .mockImplementationOnce(response);
+    const harness = bootstrapHarness({
+      href: openAiUrl,
+      sendMessage,
+      watchPolicy: vi.fn((scope) => scope === openAiUrl ? stopOpenAi : vi.fn()),
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return vi.fn();
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    onNavigate?.(typescriptUrl);
+    await vi.waitFor(() => {
+      expect(harness.controller.applyMode).toHaveBeenCalledWith("protected");
+    });
+
+    expect(stopOpenAi).toHaveBeenCalledTimes(1);
+    expect(harness.dependencies.watchPolicy).toHaveBeenLastCalledWith(
+      typescriptUrl,
+      expect.any(Function),
+    );
+  });
+
+  it("rebinds from a subreddit to Reddit home without reloading", async () => {
+    const subredditUrl = "https://www.reddit.com/r/OpenAI/";
+    const homeUrl = "https://www.reddit.com/";
+    let href = subredditUrl;
+    let onNavigate: ((href: string) => void) | undefined;
+    const sendMessage = vi.fn(async () => href === subredditUrl
+      ? redditPolicy("trusted", "OpenAI")
+      : redditPolicy("protected"));
+    const harness = bootstrapHarness({
+      href,
+      sendMessage,
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return vi.fn();
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    href = homeUrl;
+    harness.dependencies.href = href;
+    onNavigate?.(homeUrl);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(3));
+
+    expect(harness.watchPolicy).toHaveBeenLastCalledWith(homeUrl, expect.any(Function));
+    expect(harness.controller.applyMode).toHaveBeenCalledWith("protected");
+    expect(harness.controller.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("protects dynamic destination media while its Reddit policy lookup is pending", async () => {
+    const image = document.createElement("img");
+    const observer = new FakeDocumentObserver();
+    const renderer = rendererHarness();
+    const controller = new ContentController({
+      document,
+      observer,
+      renderer,
+      classify: (element) => element === image ? candidate(image, "image") : null,
+      resolveDescription: () => "A future Reddit image",
+    });
+    let onNavigate: ((href: string) => void) | undefined;
+    let resolveDestination!: (value: unknown) => void;
+    const destinationPolicy = new Promise<unknown>((resolve) => {
+      resolveDestination = resolve;
+    });
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"))
+      .mockImplementationOnce(() => destinationPolicy);
+    const harness = bootstrapHarness({
+      href: "https://www.reddit.com/r/OpenAI/",
+      sendMessage,
+      createController: () => controller,
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return vi.fn();
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    onNavigate?.("https://www.reddit.com/r/typescript/");
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(3));
+    document.body.append(image);
+    observer.emit([image]);
+
+    expect(renderer.activeFor(image)).toHaveLength(1);
+    expect(renderer.activeFor(image)[0]?.options.mode).toBe("protected");
+    resolveDestination(redditPolicy("protected", "typescript"));
+    await Promise.resolve();
+  });
+
+  it("keeps a destination watcher update that arrives before policy confirmation", async () => {
+    const openAiUrl = "https://www.reddit.com/r/OpenAI/";
+    const typescriptUrl = "https://www.reddit.com/r/typescript/";
+    let onNavigate: ((href: string) => void) | undefined;
+    let destinationListener: ((mode: SiteMode) => void) | undefined;
+    let resolveDestination!: (value: unknown) => void;
+    const destinationPolicy = new Promise<unknown>((resolve) => {
+      resolveDestination = resolve;
+    });
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"))
+      .mockImplementationOnce(() => destinationPolicy);
+    const harness = bootstrapHarness({
+      href: openAiUrl,
+      sendMessage,
+      watchPolicy: vi.fn((scope, listener) => {
+        if (scope === typescriptUrl) destinationListener = listener;
+        return vi.fn();
+      }),
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return vi.fn();
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    onNavigate?.(typescriptUrl);
+    await vi.waitFor(() => expect(destinationListener).toBeTypeOf("function"));
+    destinationListener?.("trusted");
+    resolveDestination(redditPolicy("protected", "typescript"));
+    await Promise.resolve();
+
+    expect(harness.controller.applyMode.mock.calls.map(([mode]) => mode)).toEqual([
+      "protected",
+      "trusted",
+    ]);
+  });
+
+  it("keeps the active watcher live when Back wins a pending Reddit policy lookup", async () => {
+    const openAiUrl = "https://www.reddit.com/r/OpenAI/";
+    const typescriptUrl = "https://www.reddit.com/r/typescript/";
+    let href = openAiUrl;
+    let onNavigate: ((href: string) => void) | undefined;
+    let openAiPolicyListener: ((mode: SiteMode) => void) | undefined;
+    let resolveTypescript!: (value: unknown) => void;
+    const typescriptPolicy = new Promise<unknown>((resolve) => {
+      resolveTypescript = resolve;
+    });
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce(redditPolicy("protected", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("protected", "OpenAI"))
+      .mockImplementationOnce(() => typescriptPolicy)
+      .mockResolvedValueOnce(redditPolicy("trusted", "OpenAI"));
+    const harness = bootstrapHarness({
+      href,
+      sendMessage,
+      watchPolicy: vi.fn((scope, listener) => {
+        if (scope === openAiUrl) openAiPolicyListener = listener;
+        return vi.fn();
+      }),
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return vi.fn();
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    href = typescriptUrl;
+    harness.dependencies.href = href;
+    onNavigate?.(typescriptUrl);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(3));
+    openAiPolicyListener?.("trusted");
+    expect(harness.controller.applyMode).toHaveBeenCalledExactlyOnceWith("protected");
+
+    href = openAiUrl;
+    harness.dependencies.href = href;
+    onNavigate?.(openAiUrl);
+    openAiPolicyListener?.("trusted");
+    resolveTypescript(redditPolicy("trusted", "typescript"));
+    await Promise.resolve();
+
+    expect(harness.controller.applyMode.mock.calls.map(([mode]) => mode)).toEqual([
+      "protected",
+      "protected",
+      "trusted",
+    ]);
+    expect(harness.dependencies.watchPolicy).toHaveBeenCalledTimes(3);
+  });
+
+  it("reapplies Reddit policies across Back and Forward history navigation", async () => {
+    const openAiUrl = "https://www.reddit.com/r/OpenAI/";
+    const typescriptUrl = "https://www.reddit.com/r/typescript/";
+    let onNavigate: ((href: string) => void) | undefined;
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce(redditPolicy("protected", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("protected", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("trusted", "typescript"))
+      .mockResolvedValueOnce(redditPolicy("protected", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("trusted", "typescript"));
+    const harness = bootstrapHarness({
+      href: openAiUrl,
+      sendMessage,
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return vi.fn();
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    onNavigate?.(typescriptUrl);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(3));
+    onNavigate?.(openAiUrl);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(4));
+    onNavigate?.(typescriptUrl);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(5));
+
+    expect(harness.controller.applyMode.mock.calls.map(([mode]) => mode)).toEqual([
+      "protected",
+      "trusted",
+      "protected",
+      "protected",
+      "trusted",
+    ]);
+    expect(harness.watchPolicy.mock.calls.map(([scope]) => scope)).toEqual([
+      openAiUrl,
+      typescriptUrl,
+      openAiUrl,
+      typescriptUrl,
+    ]);
+  });
+
+  it("ignores a pending Reddit route response after disposal", async () => {
+    const openAiUrl = "https://www.reddit.com/r/OpenAI/";
+    const typescriptUrl = "https://www.reddit.com/r/typescript/";
+    let onNavigate: ((href: string) => void) | undefined;
+    let resolveTypescript!: (value: unknown) => void;
+    const typescriptPolicy = new Promise<unknown>((resolve) => {
+      resolveTypescript = resolve;
+    });
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce(redditPolicy("protected", "OpenAI"))
+      .mockResolvedValueOnce(redditPolicy("protected", "OpenAI"))
+      .mockImplementationOnce(() => typescriptPolicy);
+    const stopNavigation = vi.fn();
+    const harness = bootstrapHarness({
+      href: openAiUrl,
+      sendMessage,
+      addNavigationListener: vi.fn((listener) => {
+        onNavigate = listener;
+        return stopNavigation;
+      }),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+    harness.dependencies.href = typescriptUrl;
+    onNavigate?.(typescriptUrl);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(3));
+    const onPageHide = harness.addPageHideListener.mock.calls[0]?.[0] as (() => void) | undefined;
+    onPageHide?.();
+    resolveTypescript(redditPolicy("trusted", "typescript"));
+    await Promise.resolve();
+
+    expect(stopNavigation).toHaveBeenCalledTimes(1);
+    expect(harness.controller.stop).toHaveBeenCalledTimes(1);
+    expect(harness.controller.applyMode).toHaveBeenCalledExactlyOnceWith("protected");
+    expect(harness.watchPolicy).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves Reddit child-frame policy behavior unchanged", async () => {
+    const harness = bootstrapHarness({
+      href: "https://www.reddit.com/r/OpenAI/",
+      isChildFrame: true,
+      sendMessage: vi.fn().mockResolvedValue(redditPolicy("trusted", "OpenAI")),
+    });
+
+    await bootstrapContentScript(harness.dependencies);
+
+    expect(harness.watchPolicy).toHaveBeenCalledWith(
+      "https://www.reddit.com",
+      expect.any(Function),
+    );
+    expect(harness.addNavigationListener).not.toHaveBeenCalled();
   });
 
   it("starts with a policy change received while preferences are still loading", async () => {
@@ -1096,7 +1707,7 @@ describe("content-script bootstrap", () => {
     expect(harness.controller.start).not.toHaveBeenCalled();
   });
 
-  it("stops policy watching and discards provider grants without restoring on pagehide", async () => {
+  it("stops policy watching and removes visual layers on pagehide", async () => {
     const stopWatching = vi.fn();
     const harness = bootstrapHarness({ watchPolicy: vi.fn(() => stopWatching) });
     await bootstrapContentScript(harness.dependencies);
@@ -1107,7 +1718,7 @@ describe("content-script bootstrap", () => {
     onPageHide?.();
 
     expect(stopWatching).toHaveBeenCalledTimes(1);
-    expect(harness.controller.stop).toHaveBeenCalledWith({ restoreMedia: false });
+    expect(harness.controller.stop).toHaveBeenCalledWith();
   });
 
   it("does not start after pagehide wins a pending policy lookup", async () => {
@@ -1125,7 +1736,7 @@ describe("content-script bootstrap", () => {
     resolvePolicy({ origin: "https://top.example", mode: "strict" });
     await bootstrap;
 
-    expect(harness.controller.stop).toHaveBeenCalledWith({ restoreMedia: false });
+    expect(harness.controller.stop).toHaveBeenCalledWith();
     expect(harness.controller.start).not.toHaveBeenCalled();
     expect(harness.watchPolicy).not.toHaveBeenCalled();
   });

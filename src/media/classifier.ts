@@ -6,6 +6,8 @@ const undecoratedImageMinimum = 96;
 const videoMinimum = 96;
 const interactiveDescendant =
   "button, a, input, select, textarea, [role=button], [tabindex]";
+const redditAdvertisementContainer =
+  "shreddit-dynamic-ad-link, shreddit-ad-post, shreddit-post[is-promoted], shreddit-post[promoted]";
 
 export interface ClassificationEnvironment {
   box(element: Element): ClassificationBox;
@@ -15,11 +17,20 @@ export interface ClassificationEnvironment {
 type ClassificationBox = Pick<DOMRect, "width" | "height"> &
   Partial<Pick<DOMRect, "top" | "right" | "bottom" | "left">>;
 
+export function isRedditHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return normalized === "reddit.com" || normalized.endsWith(".reddit.com");
+}
+
 export function classifyElement(
   element: Element,
   env: ClassificationEnvironment,
 ): MediaCandidate | null {
   if (!(element instanceof HTMLElement)) return null;
+  if (
+    isRedditHost(element.ownerDocument.location.hostname) &&
+    element.closest(redditAdvertisementContainer)
+  ) return null;
 
   const { width, height } = env.box(element);
   if (width <= 0 || height <= 0) return null;
@@ -69,24 +80,24 @@ function hasMeaningfulOverlappingCopy(
   element: HTMLImageElement,
   env: ClassificationEnvironment,
 ): boolean {
-  const parent = element.parentElement;
-  if (!parent) return false;
-
   const box = env.box(element);
   const redditLightbox = element.closest("#shreddit-media-lightbox");
-  const container = redditLightbox ?? parent;
+  const container = redditLightbox ??
+    element.closest("figure, article, [role='article'], shreddit-post") ??
+    element.parentElement;
+  if (!container) return false;
   const source = element.currentSrc || element.src;
-  for (const sibling of container.querySelectorAll("img[alt]")) {
+  for (const candidate of container.querySelectorAll("img[alt]")) {
     if (
-      sibling === element ||
-      !(sibling instanceof HTMLImageElement) ||
-      !sibling.getAttribute("alt")?.trim() ||
-      (!redditLightbox && (sibling.currentSrc || sibling.src) !== source)
+      candidate === element ||
+      !(candidate instanceof HTMLImageElement) ||
+      !candidate.getAttribute("alt")?.trim() ||
+      (!redditLightbox && (candidate.currentSrc || candidate.src) !== source)
     ) {
       continue;
     }
 
-    if (substantiallyOverlaps(box, env.box(sibling), redditLightbox ? 0.25 : 0.5)) return true;
+    if (substantiallyOverlaps(box, env.box(candidate), redditLightbox ? 0.25 : 0.5)) return true;
   }
   return false;
 }

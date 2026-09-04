@@ -1,6 +1,6 @@
 # Goggles Privacy Policy
 
-**Effective date: August 22, 2026**
+**Effective date: September 4, 2026**
 
 Goggles is a Chrome extension that frosts images and videos until you choose to reveal them. Goggles is designed to work locally in your browser.
 
@@ -12,7 +12,9 @@ To provide its features, Goggles reads media elements and related page informati
 
 Goggles uses Chrome's local extension storage to save:
 
-- whether ordinary media is frosted on a website;
+- whether ordinary media is frosted on each of the eight supported social platforms;
+- Reddit subreddit names and their optional on/off exceptions;
+- exact origins of non-social sites you choose to frost;
 - whether descriptions are shown by default on a website;
 - whether blocked-subject protection is enabled; and
 - the blocked-subject words you configure.
@@ -28,9 +30,9 @@ Goggles does not:
 - sell or share personal information; or
 - collect authentication, financial, health, location, or personal communications data.
 
-## Embedded videos
+## Videos
 
-Goggles can withhold recognized YouTube and Vimeo embeds until you reveal them. When you deliberately reveal an embed, your browser contacts the original video provider as the page intended. Those providers may process information under their own privacy policies. Goggles does not receive that information. Temporary browser rules used for a selected embed expire after 10 seconds and are also removed when the media is re-frosted, the page changes, the tab closes, or the extension restarts.
+Goggles can visually frost eligible native videos and recognized YouTube and Vimeo frames. It does not pause, mute, seek, delay, block, reload, or rewrite videos or provider requests. Playback state, source URLs, autoplay parameters, and provider loading remain under the page's control. Video providers may process information under their own privacy policies; Goggles does not receive that information.
 
 ## Permissions
 
@@ -38,9 +40,9 @@ Goggles uses Chrome permissions only to provide its stated features:
 
 - **storage** saves your local preferences;
 - **activeTab** identifies the current website when you use the toolbar popup;
-- **host access** lets Goggles find and frost media on web pages and gate recognized YouTube and Vimeo embeds;
-- **declarativeNetRequestWithHostAccess** withholds recognized video embeds until you reveal them; and
-- **webNavigation** removes temporary video rules when a tab navigates.
+- **host access** lets Goggles find and visually frost eligible media on web pages.
+
+By default, ordinary eligible media is frosted only on Facebook, Instagram, Reddit, X/Twitter, TikTok, Threads, Bluesky, and YouTube. Other sites remain visible unless you save an exact-origin frosting rule. Blocked-subject matching is independent and can frost likely matches in either policy state.
 
 ## Remote code
 

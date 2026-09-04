@@ -4,6 +4,7 @@ import {
   defaultTrumpKeywords,
   matchesBlockedSubject,
   parseBlockedSubjects,
+  suggestSubjectKeywords,
 } from "../../src/shared/blocked-subjects";
 
 describe("blocked subjects", () => {
@@ -59,7 +60,7 @@ describe("blocked subjects", () => {
 
     expect(candidateMatchesBlockedSubject(
       { element: card, kind: "background-image" },
-      { enabled: true, keywords: ["Trump"] },
+      { subjects: [{ name: "Donald Trump", enabled: true, keywords: ["Trump"] }] },
     )).toBe(true);
   });
 
@@ -68,7 +69,7 @@ describe("blocked subjects", () => {
     nativeVideo.poster = "donald-trump-campaign.jpg";
     const providerFrame = document.createElement("iframe");
     providerFrame.title = "Donald Trump campaign video";
-    const config = { enabled: true, keywords: ["Trump"] };
+    const config = { subjects: [{ name: "Donald Trump", enabled: true, keywords: ["Trump"] }] };
 
     expect(candidateMatchesBlockedSubject(
       { element: nativeVideo, kind: "native-video" },
@@ -90,7 +91,37 @@ describe("blocked subjects", () => {
 
   it("accepts a normalized editable keyword list and rejects malformed storage", () => {
     expect(parseBlockedSubjects({ enabled: true, keywords: ["  Trump  ", "", "Trump", "DJT"] }))
-      .toEqual({ enabled: true, keywords: ["Trump", "DJT"] });
-    expect(parseBlockedSubjects({ enabled: "yes", keywords: ["Trump"] }).enabled).toBe(false);
+      .toEqual({
+        subjects: [{ name: "Donald Trump", enabled: true, keywords: ["Trump", "DJT"] }],
+      });
+    expect(parseBlockedSubjects({ enabled: "yes", keywords: ["Trump"] }).subjects?.[0]?.enabled)
+      .toBe(false);
+  });
+
+  it("suggests the full name and a broader last-name match locally", () => {
+    expect(suggestSubjectKeywords("  Elon   Musk  ")).toEqual(["Elon Musk", "Musk"]);
+    expect(suggestSubjectKeywords("Madonna")).toEqual(["Madonna"]);
+  });
+
+  it("migrates the existing preset into a named subject", () => {
+    expect(parseBlockedSubjects({ enabled: true, keywords: ["Trump", "Donald Trump"] }))
+      .toEqual({
+        subjects: [{ name: "Donald Trump", enabled: true, keywords: ["Trump", "Donald Trump"] }],
+      });
+  });
+
+  it("matches keywords from enabled subjects only", () => {
+    const image = document.createElement("img");
+    image.alt = "Elon Musk at a conference";
+
+    expect(candidateMatchesBlockedSubject(
+      { element: image, kind: "image" },
+      {
+        subjects: [
+          { name: "Donald Trump", enabled: true, keywords: ["Trump"] },
+          { name: "Elon Musk", enabled: false, keywords: ["Elon Musk", "Musk"] },
+        ],
+      },
+    )).toBe(false);
   });
 });

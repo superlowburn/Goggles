@@ -180,6 +180,56 @@ export const protectionStyles = `
   font: inherit;
 }
 
+.eg-site-candidate {
+  overflow: visible;
+  pointer-events: none;
+}
+
+.eg-site-action {
+  appearance: none;
+  position: absolute;
+  left: auto;
+  right: var(--eg-control-right, 12px);
+  top: var(--eg-control-top, 12px);
+  bottom: auto;
+  z-index: 4;
+  min-height: 36px;
+  max-width: calc(100% - 24px);
+  padding: 8px 12px;
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  border-radius: 999px;
+  background: rgba(31, 33, 35, 0.86);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.17);
+  opacity: 0;
+  transform: none;
+  transition: opacity 120ms ease, background-color 120ms ease;
+  pointer-events: none;
+  cursor: pointer;
+  font: 600 12px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.eg-revealed.eg-has-site-action .eg-site-action {
+  right: calc(var(--eg-control-right, 12px) + var(--eg-control-size, 44px) + 8px);
+}
+
+.eg-target-hover .eg-site-action,
+.eg-site-action:hover,
+.eg-site-action:focus-visible,
+.eg-site-action-error,
+.eg-revealed .eg-site-action {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.eg-revealed.eg-has-site-action .eg-reprotect {
+  position: absolute;
+  top: var(--eg-control-top, 12px);
+  right: var(--eg-control-right, 12px);
+  width: var(--eg-control-size, 44px);
+  height: var(--eg-control-size, 44px);
+}
+
 .eg-reprotect {
   border-radius: 50%;
 }
@@ -228,6 +278,7 @@ export const protectionStyles = `
 .eg-reveal-surface:focus-visible,
 .eg-info-button:focus-visible,
 .eg-info-always:focus-visible,
+.eg-site-action:focus-visible,
 .eg-reprotect:focus-visible {
   outline: 2px solid #fff;
   outline-offset: 2px;

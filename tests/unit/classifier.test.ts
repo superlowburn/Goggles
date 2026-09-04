@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { classifyElement, type ClassificationEnvironment } from "../../src/media/classifier";
+import {
+  classifyElement,
+  isRedditHost,
+  type ClassificationEnvironment,
+} from "../../src/media/classifier";
 import { isSupportedVideoFrame } from "../../src/media/provider-frames";
 
 function environment(): {
@@ -104,6 +108,45 @@ describe("classifyElement", () => {
 
     expect(classifyElement(youtube, env)).toMatchObject({ kind: "video-iframe" });
     expect(classifyElement(vimeo, env)).toMatchObject({ kind: "video-iframe" });
+  });
+
+  it.each([
+    ["reddit.com", true],
+    ["www.reddit.com", true],
+    ["old.reddit.com", true],
+    ["localhost", false],
+    ["news.example", false],
+    ["reddit.com.evil.example", false],
+  ])("recognizes verified Reddit host %s as %s", (hostname, expected) => {
+    expect(isRedditHost(hostname)).toBe(expected);
+  });
+
+  it("keeps semantic advertisement media classifiable outside verified Reddit hosts", () => {
+    const { env, setBox } = environment();
+    const dynamicAd = document.createElement("shreddit-dynamic-ad-link");
+    const promotedAd = document.createElement("shreddit-ad-post");
+    const promotedPost = document.createElement("shreddit-post");
+    const legacyPromotedPost = document.createElement("shreddit-post");
+    promotedPost.setAttribute("is-promoted", "");
+    legacyPromotedPost.setAttribute("promoted", "");
+    const adImage = image({ alt: "Advertisement thumbnail" });
+    const adVideo = video();
+    const adFrame = youtubeIframe();
+    const legacyPromotedImage = image({ alt: "A legacy promoted post image" });
+    dynamicAd.append(adImage);
+    promotedAd.append(adVideo);
+    promotedPost.append(adFrame);
+    legacyPromotedPost.append(legacyPromotedImage);
+    document.body.append(dynamicAd, promotedAd, promotedPost, legacyPromotedPost);
+    setBox(adImage, 144, 144);
+    setBox(adVideo, 640, 360);
+    setBox(adFrame, 640, 360);
+    setBox(legacyPromotedImage, 640, 360);
+
+    expect(classifyElement(adImage, env)).toMatchObject({ kind: "image" });
+    expect(classifyElement(adVideo, env)).toMatchObject({ kind: "native-video" });
+    expect(classifyElement(adFrame, env)).toMatchObject({ kind: "video-iframe" });
+    expect(classifyElement(legacyPromotedImage, env)).toMatchObject({ kind: "image" });
   });
 
   it("recognizes only the supported exact-host video embeds", () => {

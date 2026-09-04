@@ -9,17 +9,22 @@ export interface ProtectionHandle {
   update(): void;
   setBlockedSubject(blocked: boolean): void;
   setDescriptionVisible(visible: boolean): void;
+  setPolicy(mode: SiteMode, siteControl?: SiteControl): void;
   isRevealed(): boolean;
+}
+
+export interface SiteControl {
+  mode: "protected" | "trusted";
+  save: () => Promise<void>;
 }
 
 export interface ProtectionOptions {
   description: string;
   blockedSubject?: boolean;
   mode: SiteMode;
-  onReveal: () => void;
   onToggleDescriptions: () => void;
   descriptionsVisible: boolean;
-  onReprotect: () => void;
+  siteControl?: SiteControl;
 }
 
 export interface RendererEnvironment {
@@ -37,12 +42,13 @@ interface ProtectionRecord {
   blockedSubject: boolean;
   host: HTMLElement;
   layer: HTMLDivElement;
-  onReveal: () => void;
   onToggleDescriptions: () => void;
-  onReprotect: () => void;
   descriptionVisible: boolean;
   pageDescriptionsVisible: boolean;
   mode: SiteMode;
+  siteControl?: ProtectionOptions["siteControl"];
+  siteActionBusy: boolean;
+  passive: boolean;
   revealed: boolean;
   removed: boolean;
   stopStrictWatch: (() => void) | null;
@@ -58,6 +64,13 @@ export function isTrustedActivation(event: Event): boolean {
 
   const key = (event as KeyboardEvent).key;
   return key === "Enter" || key === " " || key === "Spacebar";
+}
+
+export function isSiteControlEligible(
+  candidate: MediaCandidate,
+  box = candidate.element.getBoundingClientRect(),
+): boolean {
+  return box.width >= 280 && box.height >= 180;
 }
 
 export class ProtectionRenderer {
@@ -98,6 +111,7 @@ export class ProtectionRenderer {
       update: () => this.scheduleRecordUpdate(record),
       setBlockedSubject: (blocked) => this.setRecordBlockedSubject(record, blocked),
       setDescriptionVisible: (visible) => this.setRecordDescriptionVisible(record, visible),
+      setPolicy: (mode, siteControl) => this.setRecordPolicy(record, mode, siteControl),
       isRevealed: () => record.revealed,
     };
 
@@ -107,13 +121,14 @@ export class ProtectionRenderer {
       blockedSubject: options.blockedSubject ?? false,
       host,
       layer,
-      onReveal: options.onReveal,
       onToggleDescriptions: options.onToggleDescriptions,
-      onReprotect: options.onReprotect,
       descriptionVisible: options.descriptionsVisible,
       pageDescriptionsVisible: options.descriptionsVisible,
       mode: options.mode,
-      revealed: false,
+      siteControl: options.siteControl,
+      siteActionBusy: false,
+      passive: options.mode === "trusted" && !options.blockedSubject && options.siteControl?.mode === "protected",
+      revealed: options.mode === "trusted" && !options.blockedSubject && options.siteControl?.mode === "protected",
       removed: false,
       stopStrictWatch: null,
       handle,
@@ -125,9 +140,12 @@ export class ProtectionRenderer {
     candidate.element.addEventListener("mouseleave", record.onMouseLeave);
 
     this.records.set(candidate.element, record);
-    markProtected(candidate);
     const box = candidate.element.getBoundingClientRect();
-    this.renderProtected(record, box);
+    if (record.passive) this.renderSiteCandidate(record, box);
+    else {
+      markProtected(candidate);
+      this.renderProtected(record, box);
+    }
     this.updateRecord(record, box);
     this.startListening();
     return handle;
@@ -182,23 +200,58 @@ export class ProtectionRenderer {
   }
 
   private reveal(record: ProtectionRecord): void {
-    if (record.removed || record.revealed) return;
+    if (record.removed || record.revealed || record.passive) return;
     const keepFocus = (record.layer.getRootNode() as ShadowRoot).activeElement ===
       record.layer.querySelector(".eg-reveal-surface");
     record.revealed = true;
+    const box = record.candidate.element.getBoundingClientRect();
     record.layer.className = "eg-layer eg-revealed";
     const reprotect = this.createIconButton("eg-reprotect", "Frost again", "undo");
     reprotect.addEventListener("click", (event) => this.activate(record, event, "reprotect"));
     record.layer.replaceChildren(reprotect);
+    this.syncRevealedSiteAction(record, box);
     if (keepFocus) reprotect.focus();
     record.candidate.element.removeAttribute("data-eclipse-goggles-protected");
-    record.onReveal();
     this.updateRecord(record);
     if (record.mode === "strict") {
       record.stopStrictWatch = this.createStrictGuard().watch(record.candidate.element, () => {
         record.handle.reprotect();
       });
     }
+  }
+
+  private renderSiteCandidate(record: ProtectionRecord, box: DOMRect): void {
+    record.layer.className = "eg-layer eg-site-candidate";
+    record.layer.replaceChildren(
+      ...(isSiteControlEligible(record.candidate, box) ? [this.createSiteAction(record)] : []),
+    );
+  }
+
+  private createSiteAction(record: ProtectionRecord): HTMLButtonElement {
+    const control = record.siteControl!;
+    const label = control.mode === "protected"
+      ? "Always frost images here"
+      : "Always show images here";
+    const action = this.createButton(label, "eg-site-action", label);
+    action.addEventListener("click", (event) => {
+      if (!this.trustedActivation(event) || record.removed || record.siteActionBusy) return;
+      event.preventDefault();
+      event.stopPropagation();
+      record.siteActionBusy = true;
+      void control.save().then(() => {
+        record.siteControl = undefined;
+        action.remove();
+        record.layer.classList.remove("eg-has-site-action");
+        this.updateRecord(record);
+      }).catch(() => {
+        action.textContent = "Couldn't save. Try again.";
+        action.setAttribute("aria-label", action.textContent);
+        action.classList.add("eg-site-action-error");
+      }).finally(() => {
+        record.siteActionBusy = false;
+      });
+    });
+    return action;
   }
 
   private reprotect(record: ProtectionRecord): void {
@@ -212,7 +265,6 @@ export class ProtectionRenderer {
     if (keepFocus) record.layer.querySelector<HTMLButtonElement>(".eg-reveal-surface")?.focus();
     this.updateRecord(record);
     markProtected(record.candidate);
-    record.onReprotect();
   }
 
   private renderProtected(record: ProtectionRecord, box?: DOMRect): void {
@@ -332,6 +384,25 @@ export class ProtectionRenderer {
     this.updateDescriptionState(record);
   }
 
+  private setRecordPolicy(
+    record: ProtectionRecord,
+    mode: SiteMode,
+    siteControl?: SiteControl,
+  ): void {
+    record.mode = mode;
+    record.siteControl = siteControl;
+    if (record.revealed && !record.passive) this.updateRecord(record);
+  }
+
+  private syncRevealedSiteAction(record: ProtectionRecord, box: DOMRect): void {
+    if (!record.revealed || record.passive) return;
+    const existing = record.layer.querySelector(".eg-site-action");
+    const shouldShow = Boolean(record.siteControl) && isSiteControlEligible(record.candidate, box);
+    if (shouldShow && !existing) record.layer.append(this.createSiteAction(record));
+    if (!shouldShow) existing?.remove();
+    record.layer.classList.toggle("eg-has-site-action", shouldShow);
+  }
+
   private setRecordBlockedSubject(record: ProtectionRecord, blocked: boolean): void {
     if (record.blockedSubject === blocked) return;
     record.blockedSubject = blocked;
@@ -354,8 +425,34 @@ export class ProtectionRenderer {
     record.layer.style.setProperty("--eg-control-size", `${controlSize}px`);
     record.layer.style.setProperty("--eg-control-inset", `${inset}px`);
     record.layer.style.setProperty("--eg-frost-blur", `${blur}px`);
+    if (
+      record.passive &&
+      isSiteControlEligible(record.candidate, box) !== Boolean(record.layer.querySelector(".eg-site-action"))
+    ) {
+      this.renderSiteCandidate(record, box);
+    }
+    if (record.revealed && !record.passive) this.syncRevealedSiteAction(record, box);
     const infoControl = record.layer.querySelector<HTMLElement>(".eg-info-control");
     if (infoControl) infoControl.hidden = !showInfo;
+    if (record.passive || (record.revealed && record.layer.classList.contains("eg-has-site-action"))) {
+      const topInset = topEdgeOcclusionInset(
+        this.document,
+        record.candidate.element,
+        record.layer,
+        box,
+        this.window,
+      );
+      const clippedTop = box.top + topInset;
+      Object.assign(record.layer.style, {
+        left: `${this.window.scrollX + box.left}px`,
+        top: `${this.window.scrollY + clippedTop}px`,
+        width: `${box.width}px`,
+        height: `${Math.max(0, box.height - topInset)}px`,
+      });
+      record.layer.style.setProperty("--eg-control-right", `${Math.max(inset, box.right - this.window.innerWidth + inset)}px`);
+      record.layer.style.setProperty("--eg-control-top", `${Math.max(inset, inset - clippedTop)}px`);
+      return;
+    }
     if (record.revealed) {
       const width = Math.min(controlSize, box.width);
       const height = Math.min(controlSize, box.height);

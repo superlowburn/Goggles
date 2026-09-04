@@ -1,11 +1,11 @@
 import { classifyElement } from "../media/classifier";
 import { resolveDescription } from "../media/description";
-import { NativeVideoController } from "../media/native-video";
-import { isSupportedVideoFrame, ProviderFrameController } from "../media/provider-frames";
 import {
   ProtectionRenderer,
+  isSiteControlEligible,
   type ProtectionHandle,
   type ProtectionOptions,
+  type SiteControl,
 } from "../protection/renderer";
 import type {
   MediaCandidate,
@@ -17,6 +17,7 @@ import {
   parseBlockedSubjects,
   type BlockedSubjectsConfig,
 } from "../shared/blocked-subjects";
+import { socialPlatformForOrigin } from "../shared/site-policy";
 import { DocumentObserver } from "./document-observer";
 
 declare const __DEV__: boolean;
@@ -37,29 +38,10 @@ interface RendererPort {
   protect(candidate: MediaCandidate, options: ProtectionOptions): ProtectionHandle;
 }
 
-interface NativeVideoPort {
-  secure(video: HTMLVideoElement): void;
-  release(video: HTMLVideoElement): void;
-  reprotect(video: HTMLVideoElement): void;
-  restore(video: HTMLVideoElement): void;
-}
-
-interface ProviderFramePort {
-  gate(frame: HTMLIFrameElement): void;
-  release(frame: HTMLIFrameElement): void | Promise<void>;
-  regate(frame: HTMLIFrameElement): void;
-  restore(frame: HTMLIFrameElement): void | Promise<void>;
-  trust?(frame: HTMLIFrameElement): void | Promise<void>;
-  forget?(frame: HTMLIFrameElement): void;
-  dispose?(): void;
-}
-
 export interface ContentControllerDependencies {
   document?: Document;
   observer?: DocumentObserverPort;
   renderer?: RendererPort;
-  nativeVideo?: NativeVideoPort;
-  providerFrames?: ProviderFramePort;
   classify?: (element: Element) => MediaCandidate | null;
   resolveDescription?: (candidate: MediaCandidate) => string;
   development?: boolean;
@@ -73,20 +55,21 @@ export interface ContentControllerDependencies {
 interface ProtectionRecord {
   candidate: MediaCandidate;
   handle: ProtectionHandle;
-  expectedProviderSource?: string | null;
+  passive: boolean;
+  providerSource?: string | null;
 }
 
 export class ContentController {
   private readonly document: Document;
   private readonly observer: DocumentObserverPort;
   private readonly renderer: RendererPort;
-  private readonly nativeVideo: NativeVideoPort;
-  private readonly providerFrames: ProviderFramePort;
   private readonly classify: (element: Element) => MediaCandidate | null;
   private readonly describe: (candidate: MediaCandidate) => string;
   private readonly development: boolean;
   private readonly logDiagnostic: (tagName: string, message: string) => void;
   private readonly setDescriptionsVisible: (origin: string, visible: boolean) => void | Promise<void>;
+  private readonly setSiteMode: (origin: string, mode: SiteMode) => void | Promise<void>;
+  private readonly enableSiteControl: boolean;
   private readonly byElement = new WeakMap<Element, ProtectionRecord>();
   private readonly records = new Set<ProtectionRecord>();
   private mode: SiteMode = "trusted";
@@ -104,8 +87,6 @@ export class ContentController {
         document: this.document,
         window: this.document.defaultView ?? window,
       });
-    this.nativeVideo = dependencies.nativeVideo ?? new NativeVideoController();
-    this.providerFrames = dependencies.providerFrames ?? new ProviderFrameController();
     const view = this.document.defaultView ?? window;
     this.classify = dependencies.classify ??
       ((element) =>
@@ -118,6 +99,8 @@ export class ContentController {
     this.logDiagnostic = dependencies.logDiagnostic ??
       ((tagName, message) => console.warn(`Goggles: ${tagName}: ${message}`));
     this.setDescriptionsVisible = dependencies.setDescriptionsVisible ?? (() => undefined);
+    this.setSiteMode = dependencies.setSiteMode ?? (() => undefined);
+    this.enableSiteControl = dependencies.enableSiteControl ?? false;
   }
 
   start(context: PolicyContext): void {
@@ -143,10 +126,9 @@ export class ContentController {
     if (this.started) this.reconcileProtection();
   }
 
-  stop(options: { restoreMedia?: boolean } = {}): void {
+  stop(): void {
     this.stopObservation();
-    this.clearProtection(options.restoreMedia ?? true);
-    if (options.restoreMedia === false) this.providerFrames.dispose?.();
+    this.clearProtection();
     this.mode = "trusted";
     this.origin = null;
     this.started = false;
@@ -173,12 +155,11 @@ export class ContentController {
   }
 
   private processCandidate(element: Element): void {
-    let detachedCandidate: MediaCandidate | null = null;
     try {
       const existing = this.byElement.get(element);
       if (existing) {
         if (!element.isConnected) {
-          this.detachRecord(existing, true);
+          this.detachRecord(existing);
           return;
         }
 
@@ -187,61 +168,32 @@ export class ContentController {
           return;
         }
 
-        if (
-          existing.handle.isRevealed() &&
-          existing.candidate.kind !== "video-iframe"
-        ) {
+        if (existing.handle.isRevealed() && (
+          existing.candidate.kind !== "video-iframe" ||
+          (element instanceof HTMLIFrameElement &&
+            element.getAttribute("src") === existing.providerSource)
+        )) {
           existing.handle.update();
           return;
         }
 
-        if (existing.candidate.kind === "native-video") {
-          this.enforceProtection(existing.candidate);
-          existing.handle.update();
-          return;
-        }
-
-        if (
-          existing.candidate.kind === "video-iframe" &&
-          element instanceof HTMLIFrameElement
-        ) {
-          const currentSource = element.getAttribute("src");
-          if (currentSource === existing.expectedProviderSource) {
-            delete existing.expectedProviderSource;
-            existing.handle.update();
-            return;
-          }
-
-          this.detachRecord(existing, false);
-          if (this.providerFrames.forget) this.providerFrames.forget(element);
-          else void this.providerFrames.restore(element);
-          replaceSource(element, currentSource);
-        } else {
-          this.detachRecord(existing, false);
-          detachedCandidate = existing.candidate;
-          this.enforceProtection(existing.candidate);
-        }
+        this.detachRecord(existing);
       }
 
       if (!element.isConnected) return;
       if (this.mode === "trusted") {
         const candidate = this.classify(element);
-        if (candidate && candidateMatchesBlockedSubject(candidate, this.blockedSubjects)) {
-          this.createProtection(candidate);
-          return;
+        if (!candidate) return;
+        const blockedSubject = candidateMatchesBlockedSubject(candidate, this.blockedSubjects);
+        if (blockedSubject || (this.offersTrustedSiteControl() && isSiteControlEligible(candidate))) {
+          this.createProtection(candidate, blockedSubject);
         }
-        if (isSupportedVideoFrame(element)) void this.providerFrames.trust?.(element);
         return;
       }
       const candidate = this.classify(element);
-      if (!candidate) {
-        if (detachedCandidate) this.restoreMedia(detachedCandidate);
-        return;
-      }
+      if (!candidate) return;
       this.createProtection(candidate);
-      detachedCandidate = null;
     } catch {
-      if (detachedCandidate) this.restoreMedia(detachedCandidate);
       this.reportCandidateFailure(element);
     }
   }
@@ -253,36 +205,49 @@ export class ContentController {
     if (isVisualCandidate(candidate) && this.hasOverlappingVideoRecord(candidate)) return;
     if (isVideoCandidate(candidate)) this.removeOverlappingVisualRecords(candidate);
 
-    let prepared = false;
-    try {
-      const expectedProviderSource = this.prepareMedia(candidate);
-      prepared = true;
-      let record!: ProtectionRecord;
-      const handle = this.renderer.protect(candidate, {
-        description: this.describe(candidate),
-        blockedSubject,
-        mode: this.mode,
-        onReveal: () => {
-          void this.releaseRecord(record).catch(() => {
-            record.handle.reprotect();
-            this.reportProviderFailure(candidate.element);
-          });
-        },
-        onToggleDescriptions: () => this.toggleDescriptions(),
-        descriptionsVisible: this.descriptionsVisible,
-        onReprotect: () => this.enforceRecord(record),
-      });
-      record = { candidate, handle };
-      if (expectedProviderSource !== undefined) {
-        record.expectedProviderSource = expectedProviderSource;
-      }
-      this.byElement.set(candidate.element, record);
-      this.records.add(record);
-      this.observer.trackLayout?.(candidate.element);
-    } catch (error) {
-      if (prepared) this.restoreMedia(candidate);
-      throw error;
+    const siteControl = this.siteControl(blockedSubject);
+    const handle = this.renderer.protect(candidate, {
+      description: this.describe(candidate),
+      blockedSubject,
+      mode: this.mode,
+      onToggleDescriptions: () => this.toggleDescriptions(),
+      descriptionsVisible: this.descriptionsVisible,
+      ...(siteControl ? { siteControl } : {}),
+    });
+    const record: ProtectionRecord = {
+      candidate,
+      handle,
+      passive: this.mode === "trusted" && !blockedSubject,
+      ...(candidate.kind === "video-iframe" && candidate.element instanceof HTMLIFrameElement
+        ? { providerSource: candidate.element.getAttribute("src") }
+        : {}),
+    };
+    this.byElement.set(candidate.element, record);
+    this.records.add(record);
+    this.observer.trackLayout?.(candidate.element);
+  }
+
+  private offersTrustedSiteControl(): boolean {
+    return this.enableSiteControl && Boolean(this.origin) && !socialPlatformForOrigin(this.origin!);
+  }
+
+  private siteControl(blockedSubject: boolean): SiteControl | undefined {
+    if (
+      !this.enableSiteControl ||
+      !this.origin ||
+      socialPlatformForOrigin(this.origin)?.id === "reddit"
+    ) return undefined;
+    if (this.mode === "trusted") {
+      if (blockedSubject || socialPlatformForOrigin(this.origin)) return undefined;
+      return {
+        mode: "protected",
+        save: () => Promise.resolve(this.setSiteMode(this.origin!, "protected")),
+      };
     }
+    return {
+      mode: "trusted",
+      save: () => Promise.resolve(this.setSiteMode(this.origin!, "trusted")),
+    };
   }
 
   private hasOverlappingVideoRecord(candidate: MediaCandidate): boolean {
@@ -303,7 +268,7 @@ export class ContentController {
         isVisualCandidate(record.candidate) &&
         sharesOverlappingMediaStack(record.candidate.element, candidate.element)
       ) {
-        this.detachRecord(record, true);
+        this.detachRecord(record);
       }
     }
   }
@@ -319,97 +284,32 @@ export class ContentController {
     }
   }
 
-  private prepareMedia(candidate: MediaCandidate): string | null | undefined {
-    if (candidate.kind === "native-video") {
-      if (!(candidate.element instanceof HTMLVideoElement)) {
-        throw new TypeError("Invalid native video candidate");
-      }
-      this.nativeVideo.secure(candidate.element);
-      return undefined;
-    }
-    if (candidate.kind === "video-iframe") {
-      if (!(candidate.element instanceof HTMLIFrameElement)) {
-        throw new TypeError("Invalid provider frame candidate");
-      }
-      this.providerFrames.gate(candidate.element);
-      return candidate.element.getAttribute("src");
-    }
-    return undefined;
-  }
-
-  private async releaseRecord(record: ProtectionRecord): Promise<void> {
-    const { candidate } = record;
-    if (candidate.kind === "native-video" && candidate.element instanceof HTMLVideoElement) {
-      this.nativeVideo.release(candidate.element);
-    } else if (
-      candidate.kind === "video-iframe" &&
-      candidate.element instanceof HTMLIFrameElement
-    ) {
-      await this.providerFrames.release(candidate.element);
-      record.expectedProviderSource = candidate.element.getAttribute("src");
-    }
-  }
-
-  private enforceRecord(record: ProtectionRecord): void {
-    this.enforceProtection(record.candidate);
-    if (
-      record.candidate.kind === "video-iframe" &&
-      record.candidate.element instanceof HTMLIFrameElement
-    ) {
-      record.expectedProviderSource = record.candidate.element.getAttribute("src");
-    }
-  }
-
-  private enforceProtection(candidate: MediaCandidate): void {
-    if (candidate.kind === "native-video" && candidate.element instanceof HTMLVideoElement) {
-      this.nativeVideo.reprotect(candidate.element);
-    } else if (
-      candidate.kind === "video-iframe" &&
-      candidate.element instanceof HTMLIFrameElement
-    ) {
-      this.providerFrames.regate(candidate.element);
-    }
-  }
-
-  private restoreMedia(candidate: MediaCandidate): void {
-    if (candidate.kind === "native-video" && candidate.element instanceof HTMLVideoElement) {
-      this.nativeVideo.restore(candidate.element);
-    } else if (
-      candidate.kind === "video-iframe" &&
-      candidate.element instanceof HTMLIFrameElement
-    ) {
-      this.providerFrames.restore(candidate.element);
-    }
-  }
-
-  private detachRecord(record: ProtectionRecord, restore: boolean): void {
+  private detachRecord(record: ProtectionRecord): void {
     record.handle.remove();
     this.records.delete(record);
     this.byElement.delete(record.candidate.element);
     this.observer.untrackLayout?.(record.candidate.element);
-    if (restore) this.restoreMedia(record.candidate);
   }
 
-  private clearProtection(restore = true): void {
+  private clearProtection(): void {
     for (const record of [...this.records]) {
-      this.detachRecord(record, restore);
-      if (
-        !restore &&
-        record.candidate.kind === "video-iframe" &&
-        record.candidate.element instanceof HTMLIFrameElement
-      ) {
-        this.providerFrames.forget?.(record.candidate.element);
-      }
+      this.detachRecord(record);
     }
   }
 
   private reconcileProtection(): void {
     for (const record of [...this.records]) {
       const blockedSubject = candidateMatchesBlockedSubject(record.candidate, this.blockedSubjects);
-      if (!record.candidate.element.isConnected || (this.mode === "trusted" && !blockedSubject)) {
-        this.detachRecord(record, true);
+      const shouldBePassive = this.mode === "trusted" && !blockedSubject && this.offersTrustedSiteControl();
+      if (
+        !record.candidate.element.isConnected ||
+        (this.mode === "trusted" && !blockedSubject && !shouldBePassive) ||
+        record.passive !== shouldBePassive
+      ) {
+        this.detachRecord(record);
       } else {
         record.handle.setBlockedSubject(blockedSubject);
+        record.handle.setPolicy(this.mode, this.siteControl(blockedSubject));
       }
     }
     this.observer.scan(this.document);
@@ -420,19 +320,10 @@ export class ContentController {
     this.logDiagnostic(element.tagName, "candidate processing failed");
   }
 
-  private reportProviderFailure(element: Element): void {
-    if (!this.development) return;
-    this.logDiagnostic(element.tagName, "provider allow rule failed");
-  }
 }
 
 function isDevelopmentRuntime(): boolean {
   return typeof __DEV__ !== "undefined" && __DEV__;
-}
-
-function replaceSource(frame: HTMLIFrameElement, source: string | null): void {
-  if (source === null) frame.removeAttribute("src");
-  else frame.setAttribute("src", source);
 }
 
 function normalizeMode(mode: SiteMode): SiteMode {

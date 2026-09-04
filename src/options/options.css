@@ -157,7 +157,80 @@ h2 {
 .privacy-note { max-width: 660px; margin: 18px 0 0; font-size: 14px; }
 .save-status { min-height: 24px; margin: 8px 0 0; color: var(--lens); font-size: 14px; }
 
-.site-rules { margin-top: 24px; border-top: 1px solid var(--line); }
+.site-rules,
+.platform-list { margin-top: 24px; border-top: 1px solid var(--line); }
+.platform-rule {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 14px;
+  align-items: center;
+  min-height: 58px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+.platform-state { color: var(--muted); font-size: 14px; }
+.platform-rule input {
+  appearance: none;
+  position: relative;
+  width: 46px;
+  height: 26px;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #d7d3c5;
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+.platform-rule input::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: transform 140ms ease;
+}
+.platform-rule input:checked { background: var(--lens); }
+.platform-rule input:checked::after { transform: translateX(20px); }
+.platform-rule input:focus-visible {
+  outline: 3px solid var(--brass);
+  outline-offset: 3px;
+}
+.subreddit-exceptions { margin-top: 30px; }
+.subreddit-exceptions[hidden] { display: none; }
+.subreddit-exceptions h3 {
+  margin: 0 0 8px;
+  font: 700 22px/1.15 Georgia, serif;
+}
+.subreddit-list { border-top: 1px solid var(--line); }
+.subreddit-rule {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 14px;
+  align-items: center;
+  min-height: 58px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.subreddit-rule strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.subreddit-state { color: var(--muted); font-size: 14px; }
+.subreddit-rule button {
+  min-height: 44px;
+  padding: 0 12px;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+.subreddit-rule button:disabled { cursor: wait; opacity: 0.68; }
 .subject-card {
   margin-top: 28px;
   overflow: hidden;
@@ -165,6 +238,34 @@ h2 {
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.28);
 }
+.subject-explainer.standalone { padding: 0; }
+.add-subject-form { display: grid; gap: 10px; margin-top: 24px; }
+.add-subject-form > label { font-weight: 700; }
+.add-subject-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; }
+.add-subject-row input {
+  min-height: 44px;
+  padding: 0 12px;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfaf5;
+  font: inherit;
+}
+.add-subject-form button,
+.remove-subject {
+  min-height: 40px;
+  padding: 0 12px;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+#subject-suggestions { display: grid; gap: 8px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; }
+#subject-suggestions[hidden] { display: none; }
+#subject-suggestions label { display: flex; gap: 8px; align-items: center; }
+#subject-suggestions button { justify-self: start; }
+.remove-subject { margin: 0 22px 18px; }
 .subject-toggle {
   display: flex;
   gap: 24px;
@@ -267,6 +368,12 @@ button:focus-visible {
   .demo-media,
   .demo-media img { min-height: 220px; height: 220px; }
   section { grid-template-columns: 1fr; gap: 4px; padding: 44px 0; }
+  .add-subject-row { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 480px) {
+  .subreddit-rule { grid-template-columns: 1fr auto; }
+  .subreddit-rule button { grid-column: 1 / -1; width: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {

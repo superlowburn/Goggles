@@ -57,22 +57,23 @@ function protect(
   options: {
     kind?: MediaKind;
     mode?: SiteMode;
-    onReveal?: () => void;
     onToggleDescriptions?: () => void;
     descriptionsVisible?: boolean;
-    onReprotect?: () => void;
     description?: string;
     blockedSubject?: boolean;
+    siteControl?: {
+      mode: "protected" | "trusted";
+      save: () => Promise<void>;
+    };
   } = {},
 ) {
   const protectionOptions = {
     description: options.description ?? "A black audio component",
     mode: options.mode ?? "protected",
-    onReveal: options.onReveal ?? vi.fn(),
     onToggleDescriptions: options.onToggleDescriptions ?? vi.fn(),
     descriptionsVisible: options.descriptionsVisible ?? false,
-    onReprotect: options.onReprotect ?? vi.fn(),
     blockedSubject: options.blockedSubject ?? false,
+    ...(options.siteControl ? { siteControl: options.siteControl } : {}),
   };
   return renderer.protect(candidate(element, options.kind), protectionOptions);
 }
@@ -82,6 +83,215 @@ afterEach(() => {
 });
 
 describe("ProtectionRenderer", () => {
+  it("offers an unfrosted site control only at the 280x180 size gate", () => {
+    const eligible = document.createElement("img");
+    const narrow = document.createElement("img");
+    const short = document.createElement("img");
+    vi.spyOn(eligible, "getBoundingClientRect").mockReturnValue(rect(10, 20, 280, 180));
+    vi.spyOn(narrow, "getBoundingClientRect").mockReturnValue(rect(10, 220, 279, 180));
+    vi.spyOn(short, "getBoundingClientRect").mockReturnValue(rect(120, 220, 280, 179));
+    document.body.append(eligible, narrow, short);
+    const renderer = new ProtectionRenderer();
+
+    protect(renderer, eligible, {
+      mode: "trusted",
+      siteControl: { mode: "protected", save: vi.fn().mockResolvedValue(undefined) },
+    });
+    protect(renderer, narrow, {
+      mode: "trusted",
+      siteControl: { mode: "protected", save: vi.fn().mockResolvedValue(undefined) },
+    });
+    protect(renderer, short, {
+      mode: "trusted",
+      siteControl: { mode: "protected", save: vi.fn().mockResolvedValue(undefined) },
+    });
+
+    expect(renderer.debugLayerFor(eligible)?.classList).toContain("eg-site-candidate");
+    expect(renderer.debugLayerFor(eligible)?.querySelector(".eg-site-action")?.textContent)
+      .toBe("Always frost images here");
+    expect(eligible.hasAttribute("data-eclipse-goggles-protected")).toBe(false);
+    expect(renderer.debugLayerFor(narrow)?.querySelector(".eg-site-action")).toBeNull();
+    expect(renderer.debugLayerFor(short)?.querySelector(".eg-site-action")).toBeNull();
+  });
+
+  it("keeps Frost again but hides Always show after revealing compact media", () => {
+    const image = document.createElement("img");
+    vi.spyOn(image, "getBoundingClientRect").mockReturnValue(rect(10, 20, 144, 144));
+    document.body.append(image);
+    const renderer = new ProtectionRenderer();
+    const handle = protect(renderer, image, {
+      siteControl: { mode: "trusted", save: vi.fn().mockResolvedValue(undefined) },
+    });
+
+    handle.reveal();
+
+    const layer = renderer.debugLayerFor(image)!;
+    expect(layer.querySelector(".eg-reprotect")).not.toBeNull();
+    expect(layer.querySelector(".eg-site-action")).toBeNull();
+  });
+
+  it("exposes the trusted-page control on candidate hover or keyboard focus", () => {
+    const image = document.createElement("img");
+    vi.spyOn(image, "getBoundingClientRect").mockReturnValue(rect(10, 20, 320, 200));
+    document.body.append(image);
+    const renderer = new ProtectionRenderer();
+    protect(renderer, image, {
+      mode: "trusted",
+      siteControl: { mode: "protected", save: vi.fn().mockResolvedValue(undefined) },
+    });
+    const layer = renderer.debugLayerFor(image)!;
+    const action = layer.querySelector<HTMLButtonElement>(".eg-site-action")!;
+
+    image.dispatchEvent(new MouseEvent("mouseenter"));
+    expect(layer.classList).toContain("eg-target-hover");
+    image.dispatchEvent(new MouseEvent("mouseleave"));
+    expect(layer.classList).not.toContain("eg-target-hover");
+    action.focus();
+    expect((layer.getRootNode() as ShadowRoot).activeElement).toBe(action);
+  });
+
+  it("saves a trusted unfrosted site action without activating the underlying link", async () => {
+    const link = document.createElement("a");
+    link.href = "/destination";
+    const image = document.createElement("img");
+    link.append(image);
+    document.body.append(link);
+    vi.spyOn(image, "getBoundingClientRect").mockReturnValue(rect(10, 20, 320, 200));
+    const linkActivation = vi.fn();
+    link.addEventListener("click", linkActivation);
+    const save = vi.fn().mockResolvedValue(undefined);
+    const renderer = new ProtectionRenderer({ trustedActivation: () => true });
+    protect(renderer, image, {
+      mode: "trusted",
+      siteControl: { mode: "protected", save },
+    });
+    const action = renderer.debugLayerFor(image)?.querySelector<HTMLButtonElement>(".eg-site-action")!;
+
+    const uncancelled = action.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+
+    expect(uncancelled).toBe(false);
+    expect(linkActivation).not.toHaveBeenCalled();
+    expect(action.isConnected).toBe(false);
+  });
+
+  it("rejects synthetic site actions and keeps a failed action available for retry", async () => {
+    const image = document.createElement("img");
+    vi.spyOn(image, "getBoundingClientRect").mockReturnValue(rect(10, 20, 320, 200));
+    document.body.append(image);
+    const save = vi.fn()
+      .mockRejectedValueOnce(new Error("storage unavailable"))
+      .mockResolvedValueOnce(undefined);
+    let trusted = false;
+    const renderer = new ProtectionRenderer({ trustedActivation: () => trusted });
+    protect(renderer, image, {
+      mode: "trusted",
+      siteControl: { mode: "protected", save },
+    });
+    const action = renderer.debugLayerFor(image)?.querySelector<HTMLButtonElement>(".eg-site-action")!;
+
+    action.click();
+    expect(save).not.toHaveBeenCalled();
+    trusted = true;
+    action.click();
+    await vi.waitFor(() => expect(action.textContent).toBe("Couldn't save. Try again."));
+    expect(action.classList).toContain("eg-site-action-error");
+    action.click();
+    await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+
+    expect(action.isConnected).toBe(false);
+  });
+
+  it("adds Always show after reveal and keeps Frost again in the same root", async () => {
+    const image = document.createElement("img");
+    vi.spyOn(image, "getBoundingClientRect").mockReturnValue(rect(10, 20, 640, 360));
+    document.body.append(image);
+    const save = vi.fn().mockResolvedValue(undefined);
+    const renderer = new ProtectionRenderer({ trustedActivation: () => true });
+    const handle = protect(renderer, image, {
+      siteControl: { mode: "trusted", save },
+    });
+
+    handle.reveal();
+    const layer = renderer.debugLayerFor(image)!;
+    const action = layer.querySelector<HTMLButtonElement>(".eg-site-action")!;
+    expect(layer.querySelector(".eg-reprotect")?.getAttribute("aria-label")).toBe("Frost again");
+    expect(action.textContent).toBe("Always show images here");
+    expect(document.querySelectorAll("[data-eclipse-goggles-root]")).toHaveLength(1);
+
+    action.click();
+    await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(handle.isRevealed()).toBe(true);
+    expect(action.isConnected).toBe(false);
+  });
+
+  it("deduplicates contextual controls for the same media item", () => {
+    const image = document.createElement("img");
+    vi.spyOn(image, "getBoundingClientRect").mockReturnValue(rect(10, 20, 320, 200));
+    document.body.append(image);
+    const renderer = new ProtectionRenderer();
+    const options = {
+      mode: "trusted" as const,
+      siteControl: { mode: "protected" as const, save: vi.fn().mockResolvedValue(undefined) },
+    };
+
+    const first = protect(renderer, image, options);
+    const second = protect(renderer, image, options);
+
+    expect(second).toBe(first);
+    expect(document.querySelectorAll("[data-eclipse-goggles-root]")).toHaveLength(1);
+    expect(renderer.debugLayerFor(image)?.querySelectorAll(".eg-site-action")).toHaveLength(1);
+  });
+
+  it("removes and restores the trusted-page action as responsive media crosses the size gate", () => {
+    const frames = frameQueue();
+    const image = document.createElement("img");
+    const box = vi.spyOn(image, "getBoundingClientRect").mockReturnValue(rect(0, 0, 320, 200));
+    document.body.append(image);
+    const renderer = new ProtectionRenderer({ ...frames.environment });
+    const handle = protect(renderer, image, {
+      mode: "trusted",
+      siteControl: { mode: "protected", save: vi.fn().mockResolvedValue(undefined) },
+    });
+
+    box.mockReturnValue(rect(0, 0, 95, 96));
+    handle.update();
+    frames.flush();
+    expect(renderer.debugLayerFor(image)?.querySelector(".eg-site-action")).toBeNull();
+
+    box.mockReturnValue(rect(0, 0, 320, 200));
+    handle.update();
+    frames.flush();
+    expect(renderer.debugLayerFor(image)?.querySelector(".eg-site-action")?.textContent)
+      .toBe("Always frost images here");
+  });
+
+  it("removes and restores Always show as a revealed item crosses the size gate", () => {
+    const frames = frameQueue();
+    const image = document.createElement("img");
+    const box = vi.spyOn(image, "getBoundingClientRect").mockReturnValue(rect(0, 0, 320, 200));
+    document.body.append(image);
+    const renderer = new ProtectionRenderer({ ...frames.environment });
+    const handle = protect(renderer, image, {
+      siteControl: { mode: "trusted", save: vi.fn().mockResolvedValue(undefined) },
+    });
+    handle.reveal();
+    expect(renderer.debugLayerFor(image)?.querySelector(".eg-site-action")?.textContent)
+      .toBe("Always show images here");
+
+    box.mockReturnValue(rect(0, 0, 95, 96));
+    handle.update();
+    frames.flush();
+    expect(renderer.debugLayerFor(image)?.querySelector(".eg-site-action")).toBeNull();
+    expect(renderer.debugLayerFor(image)?.querySelector(".eg-reprotect")).not.toBeNull();
+
+    box.mockReturnValue(rect(0, 0, 320, 200));
+    handle.update();
+    frames.flush();
+    expect(renderer.debugLayerFor(image)?.querySelector(".eg-site-action")?.textContent)
+      .toBe("Always show images here");
+  });
+
   it("renders an isolated frost layer over one media item", () => {
     const image = document.createElement("img");
     vi.spyOn(image, "getBoundingClientRect").mockReturnValue(rect(20, 30, 640, 360));
@@ -199,11 +409,10 @@ describe("ProtectionRenderer", () => {
     const image = document.createElement("img");
     vi.spyOn(image, "getBoundingClientRect").mockReturnValue(rect(20, 30, 640, 360));
     document.body.append(image);
-    const onReveal = vi.fn();
     const renderer = new ProtectionRenderer({
       trustedActivation: (event) => event instanceof MouseEvent && event.type === "click",
     });
-    const handle = protect(renderer, image, { description, onReveal });
+    const handle = protect(renderer, image, { description });
     const layer = renderer.debugLayerFor(image);
     const control = layer?.querySelector<HTMLElement>(".eg-info-control");
     const info = layer?.querySelector<HTMLButtonElement>(".eg-info-button");
@@ -224,7 +433,6 @@ describe("ProtectionRenderer", () => {
     expect(control?.classList.contains("eg-info-pinned")).toBe(true);
     expect(info?.getAttribute("aria-expanded")).toBe("true");
     expect(handle.isRevealed()).toBe(false);
-    expect(onReveal).not.toHaveBeenCalled();
   });
 
   it("pins descriptions for every item when the permanent site option is activated", () => {
@@ -321,11 +529,10 @@ describe("ProtectionRenderer", () => {
       linkActivation();
     });
     document.addEventListener("click", documentActivation, { once: true });
-    const onReveal = vi.fn();
     const renderer = new ProtectionRenderer({
       trustedActivation: (event) => event.type === "click",
     });
-    protect(renderer, image, { onReveal });
+    const handle = protect(renderer, image);
 
     const host = link.nextElementSibling as HTMLElement | null;
     const activation = new MouseEvent("click", { bubbles: true, cancelable: true });
@@ -337,7 +544,7 @@ describe("ProtectionRenderer", () => {
     expect(uncancelled).toBe(false);
     expect(linkActivation).not.toHaveBeenCalled();
     expect(documentActivation).not.toHaveBeenCalled();
-    expect(onReveal).toHaveBeenCalledTimes(1);
+    expect(handle.isRevealed()).toBe(true);
   });
 
   it("places a picture control after its nearest interactive button ancestor", () => {
@@ -365,20 +572,16 @@ describe("ProtectionRenderer", () => {
     vi.spyOn(first, "getBoundingClientRect").mockReturnValue(rect(0, 0, 640, 360));
     vi.spyOn(second, "getBoundingClientRect").mockReturnValue(rect(0, 400, 640, 360));
     document.body.append(first, second);
-    const onFirstReveal = vi.fn();
-    const onSecondReveal = vi.fn();
     const renderer = new ProtectionRenderer({
       trustedActivation: (event) => event instanceof MouseEvent && event.type === "click",
     });
-    const firstHandle = protect(renderer, first, { onReveal: onFirstReveal });
-    const secondHandle = protect(renderer, second, { onReveal: onSecondReveal });
+    const firstHandle = protect(renderer, first);
+    const secondHandle = protect(renderer, second);
 
     renderer.debugLayerFor(first)?.querySelector(".eg-reveal-surface")?.dispatchEvent(
       new MouseEvent("click", { bubbles: true }),
     );
 
-    expect(onFirstReveal).toHaveBeenCalledTimes(1);
-    expect(onSecondReveal).not.toHaveBeenCalled();
     expect(firstHandle.isRevealed()).toBe(true);
     expect(first.hasAttribute("data-eclipse-goggles-protected")).toBe(false);
     expect(secondHandle.isRevealed()).toBe(false);
@@ -422,15 +625,13 @@ describe("ProtectionRenderer", () => {
     const image = document.createElement("img");
     vi.spyOn(image, "getBoundingClientRect").mockReturnValue(rect(0, 0, 640, 360));
     document.body.append(image);
-    const onReveal = vi.fn();
     const renderer = new ProtectionRenderer();
-    const handle = protect(renderer, image, { onReveal });
+    const handle = protect(renderer, image);
 
     renderer.debugLayerFor(image)?.querySelector(".eg-reveal-surface")?.dispatchEvent(
       new MouseEvent("click", { bubbles: true }),
     );
 
-    expect(onReveal).not.toHaveBeenCalled();
     expect(handle.isRevealed()).toBe(false);
   });
 
@@ -438,7 +639,6 @@ describe("ProtectionRenderer", () => {
     const image = document.createElement("img");
     vi.spyOn(image, "getBoundingClientRect").mockReturnValue(rect(0, 0, 640, 360));
     document.body.append(image);
-    const onReveal = vi.fn();
     const renderer = new ProtectionRenderer({
       trustedActivation: (event) =>
         isTrustedActivation({
@@ -447,15 +647,13 @@ describe("ProtectionRenderer", () => {
           isTrusted: true,
         } as unknown as Event),
     });
-    const handle = protect(renderer, image, { onReveal });
+    const handle = protect(renderer, image);
     const layer = renderer.debugLayerFor(image);
 
     layer?.querySelector(".eg-reveal-surface")?.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
-    expect(onReveal).not.toHaveBeenCalled();
     expect(handle.isRevealed()).toBe(false);
 
     layer?.querySelector(".eg-reveal-surface")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    expect(onReveal).toHaveBeenCalledTimes(1);
     expect(handle.isRevealed()).toBe(true);
   });
 
@@ -465,13 +663,11 @@ describe("ProtectionRenderer", () => {
     vi.spyOn(first, "getBoundingClientRect").mockReturnValue(rect(0, 0, 640, 360));
     vi.spyOn(second, "getBoundingClientRect").mockReturnValue(rect(0, 400, 640, 360));
     document.body.append(first, second);
-    const onFirstReprotect = vi.fn();
-    const onSecondReprotect = vi.fn();
     const renderer = new ProtectionRenderer({
       trustedActivation: (event) => event instanceof MouseEvent && event.type === "click",
     });
-    const firstHandle = protect(renderer, first, { onReprotect: onFirstReprotect });
-    const secondHandle = protect(renderer, second, { onReprotect: onSecondReprotect });
+    const firstHandle = protect(renderer, first);
+    const secondHandle = protect(renderer, second);
     firstHandle.reveal();
     secondHandle.reveal();
 
@@ -479,8 +675,6 @@ describe("ProtectionRenderer", () => {
     expect(protectAgain?.querySelector(".eg-reprotect")?.getAttribute("aria-label")).toBe("Frost again");
     protectAgain?.querySelector(".eg-reprotect")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
-    expect(onFirstReprotect).toHaveBeenCalledTimes(1);
-    expect(onSecondReprotect).not.toHaveBeenCalled();
     expect(firstHandle.isRevealed()).toBe(false);
     expect(secondHandle.isRevealed()).toBe(true);
   });

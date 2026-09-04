@@ -1,6 +1,9 @@
 import type { ExtensionMessage, PolicyContext, SiteMode } from "../shared/media-types";
-import { isSiteMode } from "../shared/site-policy";
-import type { BlockedSubjectsConfig } from "../shared/blocked-subjects";
+import { isCanonicalSubredditName, isSiteMode } from "../shared/site-policy";
+import {
+  hasEnabledBlockedSubjects,
+  type BlockedSubjectsConfig,
+} from "../shared/blocked-subjects";
 
 type PopupTab = { id?: number | undefined; url?: string | undefined };
 
@@ -16,16 +19,32 @@ export interface PopupChromeApi {
 
 const TITLE = "Goggles";
 const SAVE_ERROR = "Could not update protection. Try again.";
+const ROUTE_ERROR = "Reddit changed communities. Reopen Goggles and try again.";
 const START_ERROR = "Protection settings are unavailable on this page.";
 
+function hasValidRedditContext(value: PolicyContext): boolean {
+  if (value.reddit === undefined) return true;
+  return (
+    typeof value.reddit === "object" &&
+    value.reddit !== null &&
+    typeof value.reddit.displayName === "string" &&
+    isCanonicalSubredditName(value.reddit.canonicalName) &&
+    (value.reddit.inheritedMode === "protected" || value.reddit.inheritedMode === "trusted") &&
+    typeof value.reddit.hasOverride === "boolean" &&
+    (value.mode === "protected" || value.mode === "trusted")
+  );
+}
+
 function isPolicyContext(value: unknown): value is PolicyContext {
+  const context = value as PolicyContext;
   return (
     typeof value === "object" &&
     value !== null &&
     "origin" in value &&
     typeof value.origin === "string" &&
     "mode" in value &&
-    isSiteMode(value.mode)
+    isSiteMode(value.mode) &&
+    hasValidRedditContext(context)
   );
 }
 
@@ -33,11 +52,9 @@ function isBlockedSubjectsConfig(value: unknown): value is BlockedSubjectsConfig
   return (
     typeof value === "object" &&
     value !== null &&
-    "enabled" in value &&
-    typeof value.enabled === "boolean" &&
-    "keywords" in value &&
-    Array.isArray(value.keywords) &&
-    value.keywords.every((keyword) => typeof keyword === "string")
+    (("subjects" in value && Array.isArray(value.subjects)) ||
+      ("enabled" in value && typeof value.enabled === "boolean" &&
+        "keywords" in value && Array.isArray(value.keywords)))
   );
 }
 
@@ -58,6 +75,8 @@ export async function mountPopup(root: HTMLElement, chromeApi: PopupChromeApi): 
 
   const heading = createTextElement("h1", "popup-title", TITLE);
   const site = createTextElement("p", "popup-site", "");
+  const community = createTextElement("p", "popup-community", "");
+  community.hidden = true;
   const protectionSwitch = createTextElement("button", "popup-switch", "");
   protectionSwitch.type = "button";
   protectionSwitch.setAttribute("role", "switch");
@@ -72,6 +91,16 @@ export async function mountPopup(root: HTMLElement, chromeApi: PopupChromeApi): 
   switchControl.setAttribute("aria-hidden", "true");
   switchCopy.append(switchTitle, switchDescription);
   protectionSwitch.append(switchCopy, switchControl);
+  const redditContext = createTextElement("div", "popup-reddit-context", "");
+  redditContext.hidden = true;
+  const redditState = createTextElement("span", "popup-reddit-state", "");
+  const resetSubreddit = createTextElement(
+    "button",
+    "popup-reset-subreddit",
+    "Use Reddit setting",
+  );
+  resetSubreddit.type = "button";
+  redditContext.append(redditState, resetSubreddit);
   const blockedSubjects = createTextElement("div", "popup-subjects", "");
   const subjectsTitle = createTextElement("span", "popup-subjects-title", "Blocked subjects");
   const subjectsState = createTextElement("span", "popup-subjects-state", "");
@@ -80,10 +109,22 @@ export async function mountPopup(root: HTMLElement, chromeApi: PopupChromeApi): 
   const error = createTextElement("p", "popup-error", "");
   error.setAttribute("role", "alert");
   error.hidden = true;
+  const status = createTextElement("p", "popup-status", "");
+  status.setAttribute("aria-live", "polite");
   const settings = createTextElement("button", "popup-settings", "Open settings");
   settings.type = "button";
   settings.addEventListener("click", () => void chromeApi.runtime.openOptionsPage());
-  root.append(heading, site, protectionSwitch, error, blockedSubjects, settings);
+  root.append(
+    heading,
+    site,
+    community,
+    protectionSwitch,
+    redditContext,
+    error,
+    status,
+    blockedSubjects,
+    settings,
+  );
 
   const [activeTab] = await chromeApi.tabs.query({ active: true, currentWindow: true });
   if (typeof activeTab?.id !== "number") {
@@ -107,8 +148,9 @@ export async function mountPopup(root: HTMLElement, chromeApi: PopupChromeApi): 
     error.hidden = false;
     return;
   }
-  subjectsState.textContent = initialResponse.blockedSubjects.enabled ? "On" : "Off";
-  subjectsDescription.textContent = initialResponse.blockedSubjects.enabled
+  const subjectsEnabled = hasEnabledBlockedSubjects(initialResponse.blockedSubjects);
+  subjectsState.textContent = subjectsEnabled ? "On" : "Off";
+  subjectsDescription.textContent = subjectsEnabled
     ? "Stay frosted on every site."
     : "Turn on matching in Settings.";
 
@@ -120,56 +162,161 @@ export async function mountPopup(root: HTMLElement, chromeApi: PopupChromeApi): 
     error.hidden = false;
     return;
   }
-  site.textContent = hostname;
-
   let confirmedMode: Exclude<SiteMode, "strict"> =
     initialResponse.mode === "trusted" ? "trusted" : "protected";
+  let reddit = initialResponse.reddit ? { ...initialResponse.reddit } : undefined;
 
-  const selectMode = (selectedMode: Exclude<SiteMode, "strict">): void => {
+  const render = (): void => {
+    const selectedMode = confirmedMode;
     const protectedMode = selectedMode === "protected";
     protectionSwitch.setAttribute("aria-checked", String(protectedMode));
-    switchDescription.textContent = protectedMode
-      ? "On — click an item to reveal it."
-      : "Off — ordinary media shows normally.";
+    if (!reddit) {
+      site.textContent = hostname;
+      community.hidden = true;
+      switchTitle.textContent = "Frost images and videos";
+      protectionSwitch.removeAttribute("aria-label");
+      switchDescription.textContent = protectedMode
+        ? "On — click an item to reveal it."
+        : "Off — ordinary media shows normally.";
+      redditContext.hidden = true;
+      return;
+    }
+
+    const subreddit = `r/${reddit.displayName}`;
+    site.textContent = "Reddit";
+    community.textContent = subreddit;
+    community.hidden = false;
+    switchTitle.textContent = `Frost media in ${subreddit}`;
+    protectionSwitch.setAttribute("aria-label", `Frost media in ${subreddit}`);
+    switchDescription.textContent = reddit.hasOverride
+      ? protectedMode
+        ? `On - frosted in ${subreddit}.`
+        : `Off - media shows normally in ${subreddit}.`
+      : `${protectedMode ? "On" : "Off"} - using your Reddit setting.`;
+    redditState.textContent = `All Reddit: ${reddit.inheritedMode === "protected" ? "On" : "Off"}`;
+    if (reddit.hasOverride) {
+      redditContext.append(resetSubreddit);
+    } else {
+      resetSubreddit.remove();
+    }
+    redditContext.hidden = false;
   };
 
   const setBusy = (busy: boolean): void => {
     protectionSwitch.disabled = busy;
+    protectionSwitch.setAttribute("aria-busy", String(busy));
+    resetSubreddit.disabled = busy;
+    resetSubreddit.setAttribute("aria-busy", String(busy));
   };
 
-  selectMode(confirmedMode);
+  if (reddit) {
+    subjectsDescription.textContent = "Blocked subjects stay frosted here.";
+  }
+  render();
   protectionSwitch.addEventListener("click", async () => {
     if (protectionSwitch.disabled) return;
 
     const priorMode = confirmedMode;
+    const priorReddit = reddit ? { ...reddit } : undefined;
     const nextMode = confirmedMode === "protected" ? "trusted" : "protected";
+    let routeChanged = false;
     error.hidden = true;
     error.textContent = "";
-    selectMode(nextMode);
+    status.textContent = "";
+    confirmedMode = nextMode;
+    if (reddit) reddit.hasOverride = true;
+    render();
     setBusy(true);
 
     try {
-      const response = await chromeApi.runtime.sendMessage({
-        type: "policy:set-tab",
-        tabId,
-        mode: nextMode,
-        expectedOrigin: initialResponse.origin,
-      });
+      const response = await chromeApi.runtime.sendMessage(reddit
+        ? {
+          type: "policy:set-subreddit",
+          tabId,
+          expectedSubreddit: reddit.canonicalName,
+          mode: nextMode,
+        }
+        : {
+          type: "policy:set-tab",
+          tabId,
+          mode: nextMode,
+          expectedOrigin: initialResponse.origin,
+        });
+      routeChanged = Boolean(
+        response && typeof response === "object" &&
+        "error" in response && response.error === "subreddit-changed",
+      );
       if (
         !isPolicyContext(response) ||
         response.mode !== nextMode ||
-        response.origin !== initialResponse.origin
+        response.origin !== initialResponse.origin ||
+        (reddit && (
+          response.reddit?.canonicalName !== reddit.canonicalName ||
+          response.reddit.hasOverride !== true
+        ))
       ) {
         throw new TypeError("Invalid policy response");
       }
       confirmedMode = nextMode;
-      selectMode(confirmedMode);
+      if (response.reddit) reddit = { ...response.reddit };
+      render();
+      if (reddit) status.textContent = `Saved for r/${reddit.displayName}.`;
     } catch {
-      selectMode(priorMode);
-      error.textContent = SAVE_ERROR;
+      confirmedMode = priorMode;
+      reddit = priorReddit;
+      render();
+      error.textContent = routeChanged ? ROUTE_ERROR : SAVE_ERROR;
       error.hidden = false;
     } finally {
       setBusy(false);
+      protectionSwitch.focus();
+    }
+  });
+
+  resetSubreddit.addEventListener("click", async () => {
+    if (resetSubreddit.disabled || !reddit?.hasOverride) return;
+
+    const priorMode = confirmedMode;
+    const priorReddit = { ...reddit };
+    let routeChanged = false;
+    let resetSucceeded = false;
+    error.hidden = true;
+    error.textContent = "";
+    status.textContent = "";
+    setBusy(true);
+
+    try {
+      const response = await chromeApi.runtime.sendMessage({
+        type: "policy:reset-subreddit",
+        tabId,
+        expectedSubreddit: reddit.canonicalName,
+      });
+      routeChanged = Boolean(
+        response && typeof response === "object" &&
+        "error" in response && response.error === "subreddit-changed",
+      );
+      if (
+        !isPolicyContext(response) ||
+        response.origin !== initialResponse.origin ||
+        response.reddit?.canonicalName !== reddit.canonicalName ||
+        response.reddit.hasOverride
+      ) {
+        throw new TypeError("Invalid policy response");
+      }
+      confirmedMode = response.mode === "trusted" ? "trusted" : "protected";
+      reddit = { ...response.reddit };
+      render();
+      status.textContent = "Using your Reddit setting.";
+      resetSucceeded = true;
+    } catch {
+      confirmedMode = priorMode;
+      reddit = priorReddit;
+      render();
+      error.textContent = routeChanged ? ROUTE_ERROR : SAVE_ERROR;
+      error.hidden = false;
+    } finally {
+      setBusy(false);
+      (resetSucceeded ? protectionSwitch : resetSubreddit).focus();
     }
   });
 }

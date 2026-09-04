@@ -1,23 +1,24 @@
 import { chromium, expect, test } from "@playwright/test";
 import { resolve } from "node:path";
+import { seedProtectedOrigin } from "./extension-storage";
 
 const extensionPath = resolve("dist");
 const fixtureUrl = "http://127.0.0.1:4173/sticky-header-media.html";
 
 test("clips frost below a sticky site header without losing reveal isolation", async () => {
   const context = await chromium.launchPersistentContext("", {
-    headless: false,
+    channel: "chromium",
+    headless: true,
     viewport: { width: 427, height: 240 },
     args: [
       "--window-size=427,240",
-      "--window-position=-10000,-10000",
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
     ],
   });
 
   try {
-    await (context.serviceWorkers()[0] ?? context.waitForEvent("serviceworker"));
+    await seedProtectedOrigin(context, "http://127.0.0.1:4173");
     const page = context.pages()[0] ?? await context.newPage();
     await page.goto(fixtureUrl);
     const media = page.locator("#media");

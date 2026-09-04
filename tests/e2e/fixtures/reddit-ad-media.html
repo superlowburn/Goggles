@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Reddit advertisement media fixture</title>
+    <style>
+      body { margin: 20px; }
+      img, video { display: block; margin-bottom: 20px; width: 320px; height: 180px; }
+    </style>
+  </head>
+  <body>
+    <shreddit-post>
+      <img
+        id="ordinary-media"
+        alt="An ordinary Reddit post image"
+        src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='320' height='180'/%3E"
+      >
+    </shreddit-post>
+    <shreddit-dynamic-ad-link>
+      <img
+        id="dynamic-ad-thumbnail"
+        alt="A promoted thumbnail"
+        src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='144' height='144'/%3E"
+        style="width: 144px; height: 144px"
+      >
+    </shreddit-dynamic-ad-link>
+    <shreddit-ad-post>
+      <video id="promoted-video" aria-label="A promoted Reddit video"></video>
+    </shreddit-ad-post>
+    <shreddit-post is-promoted>
+      <img
+        id="promoted-post-image"
+        alt="A promoted post image"
+        src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='320' height='180'/%3E"
+      >
+    </shreddit-post>
+  </body>
+</html>
